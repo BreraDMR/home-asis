@@ -42,8 +42,16 @@ def init() -> None:
             first_seen TEXT,
             last_seen TEXT,
             present INTEGER DEFAULT 0,
-            notify INTEGER DEFAULT 1
+            notify INTEGER DEFAULT 1,
+            rssi INTEGER,
+            freq INTEGER
         )""")
+        # older databases predate the signal columns
+        for col, ddl in (("rssi", "INTEGER"), ("freq", "INTEGER")):
+            try:
+                c.execute(f"ALTER TABLE networks ADD COLUMN {col} {ddl}")
+            except sqlite3.OperationalError:
+                pass
         c.execute("""CREATE TABLE IF NOT EXISTS kv (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -122,25 +130,28 @@ def label_device(mac: str, label: str) -> None:
 
 # ---------- wifi networks around ----------
 
-def seen_networks(found: dict[str, str]) -> tuple[list[dict], list[dict]]:
-    """Feed in {bssid: ssid}. Same contract as seen_devices."""
+def seen_networks(found: dict[str, dict]) -> tuple[list[dict], list[dict]]:
+    """Feed in {bssid: {ssid, rssi, freq}}. Same contract as seen_devices."""
     appeared, gone = [], []
     with conn() as c:
         known = {r["bssid"]: dict(r) for r in c.execute("SELECT * FROM networks")}
-        for bssid, ssid in found.items():
+        for bssid, info in found.items():
+            ssid, rssi, freq = info.get("ssid"), info.get("rssi"), info.get("freq")
             row = known.get(bssid)
             if row is None:
                 c.execute(
-                    "INSERT INTO networks(bssid,ssid,label,first_seen,last_seen,present) VALUES(?,?,?,?,?,1)",
-                    (bssid, ssid, None, now(), now()),
+                    "INSERT INTO networks(bssid,ssid,label,first_seen,last_seen,present,rssi,freq)"
+                    " VALUES(?,?,?,?,?,1,?,?)",
+                    (bssid, ssid, None, now(), now(), rssi, freq),
                 )
-                appeared.append({"bssid": bssid, "ssid": ssid, "label": None, "is_new": True})
+                appeared.append({"bssid": bssid, "ssid": ssid, "label": None,
+                                 "rssi": rssi, "freq": freq, "is_new": True})
             else:
                 if not row["present"]:
-                    appeared.append({**row, "ssid": ssid, "is_new": False})
+                    appeared.append({**row, "ssid": ssid, "rssi": rssi, "freq": freq, "is_new": False})
                 c.execute(
-                    "UPDATE networks SET ssid=?, last_seen=?, present=1 WHERE bssid=?",
-                    (ssid, now(), bssid),
+                    "UPDATE networks SET ssid=?, last_seen=?, present=1, rssi=?, freq=? WHERE bssid=?",
+                    (ssid, now(), rssi, freq, bssid),
                 )
         for bssid, row in known.items():
             if row["present"] and bssid not in found:

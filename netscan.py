@@ -11,7 +11,8 @@ import re
 from actions import run, wifi_info, wifi_scan
 
 ARP = "/proc/net/arp"
-BAD_MAC = {"00:00:00:00:00:00"}
+# 02:00:00:00:00:00 is what Android reports for itself when it hides its mac
+BAD_MAC = {"00:00:00:00:00:00", "02:00:00:00:00:00"}
 
 
 async def _own_subnet() -> tuple[str, str] | None:
@@ -71,14 +72,48 @@ async def arp_table(prefix: str | None = None, own_ip: str | None = None) -> dic
     return found
 
 
-async def scan_networks() -> dict[str, str]:
-    """Access points in range: {bssid: ssid}."""
-    out: dict[str, str] = {}
+def distance_m(rssi: int | float | None, freq_mhz: int | float | None) -> float | None:
+    """Very rough free-space distance estimate from signal strength.
+
+    Walls, bodies and cheap antennas all lie to this formula, so treat it as
+    "same room / next room / far", not as a tape measure.
+    """
+    if rssi is None or not freq_mhz:
+        return None
+    import math
+    try:
+        return round(10 ** ((27.55 - (20 * math.log10(float(freq_mhz))) + abs(float(rssi))) / 20), 1)
+    except Exception:
+        return None
+
+
+def distance_label(rssi, freq) -> str:
+    d = distance_m(rssi, freq)
+    if d is None:
+        return ""
+    if d < 5:
+        near = "рядом"
+    elif d < 15:
+        near = "в квартире"
+    elif d < 40:
+        near = "у соседей"
+    else:
+        near = "далеко"
+    return f"~{d} м, {near}"
+
+
+async def scan_networks() -> dict[str, dict]:
+    """Access points in range: {bssid: {ssid, rssi, freq}}."""
+    out: dict[str, dict] = {}
     for ap in await wifi_scan():
         bssid = (ap.get("bssid") or "").lower()
         if not bssid or bssid in BAD_MAC:
             continue
-        out[bssid] = ap.get("ssid") or "(скрытая)"
+        out[bssid] = {
+            "ssid": ap.get("ssid") or "(скрытая)",
+            "rssi": ap.get("rssi"),
+            "freq": ap.get("frequency_mhz"),
+        }
     return out
 
 

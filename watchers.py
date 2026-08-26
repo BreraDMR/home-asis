@@ -12,6 +12,10 @@ import actions
 import netscan
 import store
 
+# neighbours' access points are noise; only shout about ones that are actually
+# close, or ones Damir has bothered to name
+RSSI_NOTIFY_MIN = int(store.get("rssi_notify_min", "-70") or -70)
+
 # how long a device may stay silent before we call it "gone".
 # phones sleep their wifi, so a single missed sweep means nothing.
 MISS_LIMIT = int(store.get("presence_miss_limit", "3") or 3)
@@ -29,6 +33,15 @@ def _name(row: dict) -> str:
     mac = row.get("mac", "")
     ip = row.get("last_ip") or ""
     return f"{mac}{(' · ' + ip) if ip else ''}"
+
+
+def _signal(row: dict) -> str:
+    rssi, freq = row.get("rssi"), row.get("freq")
+    if rssi is None:
+        return ""
+    dist = netscan.distance_label(rssi, freq)
+    band = "5 ГГц" if freq and int(freq) > 3000 else "2.4 ГГц"
+    return f"\n   📡 {rssi} дБм · {band}" + (f" · {dist}" if dist else "")
 
 
 async def power_watcher(send, period: int = 30) -> None:
@@ -110,12 +123,15 @@ async def networks_watcher(send, period: int = 300) -> None:
                 appeared, gone = store.seen_networks(found)
                 if store.flag("notify_networks"):
                     for n in appeared:
-                        if n.get("is_new"):
-                            await send(f"📶 Новая сеть рядом: <b>{_name(n)}</b>")
-                        else:
-                            await send(f"📶 Сеть снова в эфире: <b>{_name(n)}</b>")
+                        close_enough = (n.get("rssi") or -99) >= RSSI_NOTIFY_MIN
+                        if not (close_enough or n.get("label")):
+                            continue  # some neighbour's router, don't care
+                        head = "📶 Новая сеть рядом" if n.get("is_new") else "📶 Сеть снова в эфире"
+                        await send(f"{head}: <b>{_name(n)}</b>{_signal(n)}")
                     for n in gone:
-                        await send(f"📵 Сеть пропала: <b>{_name(n)}</b>")
+                        if not ((n.get("rssi") or -99) >= RSSI_NOTIFY_MIN or n.get("label")):
+                            continue
+                        await send(f"📵 Сеть пропала: <b>{_name(n)}</b>{_signal(n)}")
         except Exception:
             pass
         await asyncio.sleep(period)

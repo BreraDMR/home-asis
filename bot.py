@@ -387,10 +387,19 @@ async def home_report(chat, what: str) -> None:
         found = await netscan.scan_networks()
         store.seen_networks(found)
         rows = [r for r in store.network_list() if r["present"]]
+        # strongest first — the ones at the top are the ones in this flat
+        rows.sort(key=lambda r: (r["rssi"] if r["rssi"] is not None else -999), reverse=True)
         lines = [f"📶 <b>Сетей в эфире: {len(rows)}</b>"]
         for r in rows[:25]:
             name = r["label"] or r["ssid"] or r["bssid"]
-            lines.append(f"• {html.escape(name)}")
+            dist = netscan.distance_label(r["rssi"], r["freq"])
+            band = "5" if r["freq"] and int(r["freq"]) > 3000 else "2.4"
+            lines.append(
+                f"• <b>{html.escape(name)}</b>\n   {r['rssi']} дБм · {band} ГГц"
+                + (f" · {dist}" if dist else "")
+            )
+        lines.append("\n<i>Расстояние прикидочное: считается по силе сигнала, "
+                     "стены и мебель врут в обе стороны.</i>")
         await chat.send_message("\n".join(lines), parse_mode=ParseMode.HTML)
 
     elif what == "temp":
