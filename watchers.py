@@ -12,9 +12,9 @@ import actions
 import netscan
 import store
 
-# neighbours' access points are noise; only shout about ones that are actually
-# close, or ones Damir has bothered to name
-RSSI_NOTIFY_MIN = int(store.get("rssi_notify_min", "-70") or -70)
+# Damir wants to see every network, however faint — so nothing is filtered out.
+# The anti-spam trick is batching: one message per scan, not one per network.
+BATCH_LIMIT = 12  # if more than this appear at once, summarise instead
 
 # how long a device may stay silent before we call it "gone".
 # phones sleep their wifi, so a single missed sweep means nothing.
@@ -122,16 +122,22 @@ async def networks_watcher(send, period: int = 300) -> None:
             if found:
                 appeared, gone = store.seen_networks(found)
                 if store.flag("notify_networks"):
-                    for n in appeared:
-                        close_enough = (n.get("rssi") or -99) >= RSSI_NOTIFY_MIN
-                        if not (close_enough or n.get("label")):
-                            continue  # some neighbour's router, don't care
-                        head = "📶 Новая сеть рядом" if n.get("is_new") else "📶 Сеть снова в эфире"
-                        await send(f"{head}: <b>{_name(n)}</b>{_signal(n)}")
-                    for n in gone:
-                        if not ((n.get("rssi") or -99) >= RSSI_NOTIFY_MIN or n.get("label")):
+                    fresh = [n for n in appeared if n.get("is_new")]
+                    back = [n for n in appeared if not n.get("is_new")]
+                    for title, group in (("📶 <b>Новые сети в эфире</b>", fresh),
+                                         ("📶 <b>Сети вернулись</b>", back),
+                                         ("📵 <b>Сети пропали</b>", gone)):
+                        if not group:
                             continue
-                        await send(f"📵 Сеть пропала: <b>{_name(n)}</b>{_signal(n)}")
+                        # strongest first, so the interesting ones are on top
+                        group.sort(key=lambda n: (n.get("rssi") or -999), reverse=True)
+                        if len(group) > BATCH_LIMIT:
+                            head = group[:BATCH_LIMIT]
+                            tail = f"\n…и ещё {len(group) - BATCH_LIMIT} — смотри 📜 Журнал сетей"
+                        else:
+                            head, tail = group, ""
+                        body = "\n".join(f"• <b>{_name(n)}</b>{_signal(n)}" for n in head)
+                        await send(f"{title}\n{body}{tail}")
         except Exception:
             pass
         await asyncio.sleep(period)

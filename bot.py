@@ -156,6 +156,7 @@ async def section_home(update: Update, ctx) -> None:
             [("👥 Кто дома", "home:devices"), ("📶 Сети рядом", "home:networks")],
             [("🌡 Термометр", "home:temp"), ("🔋 Батарея", "home:batt")],
             [("💡 Освещённость", "home:light"), ("📊 Статус", "home:status")],
+            [("📜 Журнал сетей", "home:netlog"), ("📜 Журнал устройств", "home:devlog")],
             [("✏️ Подписать устройство", "label:dev"), ("✏️ Подписать сеть", "label:net")],
         ]),
     )
@@ -401,6 +402,40 @@ async def home_report(chat, what: str) -> None:
         lines.append("\n<i>Расстояние прикидочное: считается по силе сигнала, "
                      "стены и мебель врут в обе стороны.</i>")
         await chat.send_message("\n".join(lines), parse_mode=ParseMode.HTML)
+
+    elif what == "netlog":
+        rows = store.network_list()
+        rows.sort(key=lambda r: (r["present"], r["last_seen"] or ""), reverse=True)
+        lines = [f"📜 <b>Журнал сетей</b> — всего видели {len(rows)}\n"]
+        for r in rows[:60]:
+            name = r["label"] or r["ssid"] or r["bssid"]
+            mark = "🟢" if r["present"] else "⚪️"
+            dist = netscan.distance_label(r["rssi"], r["freq"])
+            seen = (r["last_seen"] or "")[5:16]
+            first = (r["first_seen"] or "")[5:16]
+            lines.append(
+                f"{mark} <b>{html.escape(name)}</b> · {r['rssi']} дБм"
+                + (f" · {dist}" if dist else "")
+                + f"\n   <i>впервые {first} · видели {seen}</i>"
+            )
+        text = "\n".join(lines)
+        for chunk in [text[i:i + 3800] for i in range(0, len(text), 3800)]:
+            await chat.send_message(chunk, parse_mode=ParseMode.HTML)
+
+    elif what == "devlog":
+        rows = store.device_list()
+        rows.sort(key=lambda r: (r["online"], r["last_seen"] or ""), reverse=True)
+        lines = [f"📜 <b>Журнал устройств</b> — всего видели {len(rows)}\n"]
+        for r in rows[:60]:
+            name = r["label"] or r["mac"]
+            mark = "🟢" if r["online"] else "⚪️"
+            lines.append(
+                f"{mark} <b>{html.escape(name)}</b> · <code>{r['last_ip'] or ''}</code>"
+                f"\n   <i>впервые {(r['first_seen'] or '')[5:16]} · видели {(r['last_seen'] or '')[5:16]}</i>"
+            )
+        text = "\n".join(lines)
+        for chunk in [text[i:i + 3800] for i in range(0, len(text), 3800)]:
+            await chat.send_message(chunk, parse_mode=ParseMode.HTML)
 
     elif what == "temp":
         b = await actions.battery()
