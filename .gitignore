@@ -1,0 +1,7 @@
+.env
+*.env
+!.env.example
+home.db
+tmp/
+__pycache__/
+*.pyc
