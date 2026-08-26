@@ -121,7 +121,10 @@ async def networks_watcher(send, period: int = 300) -> None:
             found = await netscan.scan_networks()
             if found:
                 appeared, gone = store.seen_networks(found)
-                if store.flag("notify_networks"):
+                # Off by default now: Damir found the neighbours' routers coming
+                # and going all day genuinely annoying. The log keeps everything,
+                # the button shows it on demand.
+                if store.flag("notify_networks", False):
                     fresh = [n for n in appeared if n.get("is_new")]
                     back = [n for n in appeared if not n.get("is_new")]
                     for title, group in (("📶 <b>Новые сети в эфире</b>", fresh),

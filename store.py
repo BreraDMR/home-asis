@@ -52,6 +52,11 @@ def init() -> None:
                 c.execute(f"ALTER TABLE networks ADD COLUMN {col} {ddl}")
             except sqlite3.OperationalError:
                 pass
+        c.execute("""CREATE TABLE IF NOT EXISTS macros (
+            name TEXT PRIMARY KEY,
+            steps TEXT NOT NULL,
+            created_at TEXT
+        )""")
         c.execute("""CREATE TABLE IF NOT EXISTS kv (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -172,3 +177,30 @@ def network_list(present_only: bool = False) -> list[dict]:
 def label_network(bssid: str, label: str) -> None:
     with conn() as c:
         c.execute("UPDATE networks SET label=? WHERE bssid=?", (label, bssid))
+
+
+# ---------- IR macros ----------
+
+def save_macro(name: str, steps: list[str]) -> None:
+    with conn() as c:
+        c.execute(
+            "INSERT INTO macros(name,steps,created_at) VALUES(?,?,?)"
+            " ON CONFLICT(name) DO UPDATE SET steps=excluded.steps",
+            (name, ",".join(steps), now()),
+        )
+
+
+def macro_list() -> list[dict]:
+    with conn() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM macros ORDER BY name")]
+
+
+def macro_steps(name: str) -> list[str]:
+    with conn() as c:
+        row = c.execute("SELECT steps FROM macros WHERE name=?", (name,)).fetchone()
+        return row["steps"].split(",") if row else []
+
+
+def delete_macro(name: str) -> None:
+    with conn() as c:
+        c.execute("DELETE FROM macros WHERE name=?", (name,))

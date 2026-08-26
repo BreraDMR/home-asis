@@ -135,15 +135,20 @@ async def battery() -> dict:
     return await run_json(["termux-battery-status"], timeout=20) or {}
 
 
+# This phone reports THREE sensors all called "LTR579 ALSPS". Asking by the
+# bare name gets you the proximity one (a constant 5.0 cm), which is why the
+# light reading looked frozen. The "-Wakeup Secondary" variant is the real
+# ambient light channel, and its name is unique enough to match exactly.
+LIGHT_SENSOR = "LTR579 ALSPS -Wakeup Secondary"
+
+
 async def light_level() -> float | None:
-    """Ambient light in lux, via the ALSPS sensor. One shot, then stop."""
-    data = await run_json(
-        ["termux-sensor", "-s", "LTR579 ALSPS", "-n", "1"], timeout=25
-    )
+    """Ambient light in lux. Averages a few samples — the sensor is jittery."""
+    data = await run_json(["termux-sensor", "-s", LIGHT_SENSOR, "-n", "3"], timeout=30)
     if not data:
         return None
     for key, vals in data.items():
-        if isinstance(vals, dict) and "values" in vals and vals["values"]:
+        if isinstance(vals, dict) and vals.get("values"):
             return float(vals["values"][0])
     return None
 

@@ -5,11 +5,13 @@ LG uses the NEC protocol at 38 kHz with address 0x20DF, so every button is a
 raw on/off durations in microseconds, so we expand the code into a burst
 pattern ourselves.
 
-STATUS: WORK IN PROGRESS. The codes below are the standard LG NEC set and the
-encoder follows the NEC spec, but none of it has been fired at Damir's actual
-TV yet. Test one button (POWER) before trusting the rest.
+STATUS: confirmed working on 2026-08-26 — power, mute, volume, OK, menu and
+input all responded on the real set. Power sometimes needs a second press,
+which is the TV's own quirk, not ours.
 """
 from __future__ import annotations
+
+import asyncio
 
 from actions import run
 
@@ -70,3 +72,16 @@ async def send(button: str) -> tuple[bool, str]:
     if rc != 0:
         return False, (err or out or "ИК-передатчик не ответил").strip()[:200]
     return True, "отправлено"
+
+
+async def play_macro(steps: list[str], gap: float = 0.7) -> tuple[int, list[str]]:
+    """Fire a saved sequence of buttons. Returns (sent, failures)."""
+    sent, failed = 0, []
+    for step in steps:
+        ok, msg = await send(step)
+        if ok:
+            sent += 1
+        else:
+            failed.append(f"{step}: {msg}")
+        await asyncio.sleep(gap)
+    return sent, failed

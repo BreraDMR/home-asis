@@ -131,21 +131,33 @@ async def section_say(update: Update, ctx) -> None:
     await update.message.reply_text("Напиши текст — телефон произнесёт его вслух.")
 
 
+def tv_kb(recording: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [("⏻ Питание", "tv:power"), ("🔇 Звук", "tv:mute")],
+        [("🔊 Громче", "tv:vol_up"), ("🔉 Тише", "tv:vol_down")],
+        [("⚙️ Настройки ТВ", "tv:menu"), ("🔌 Источник", "tv:input")],
+        [("⬆️", "tv:up")],
+        [("⬅️", "tv:left"), ("OK", "tv:ok"), ("➡️", "tv:right")],
+        [("⬇️", "tv:down")],
+        [("↩️ Назад", "tv:back"), ("🏠 Home", "tv:home"), ("✖️ Выход", "tv:exit")],
+    ]
+    macros = store.macro_list()
+    if macros:
+        rows.append([(f"🎬 {m['name']}", f"macro:run:{m['name']}") for m in macros[:3]])
+    if recording:
+        rows.append([("💾 Сохранить последовательность", "macro:save"),
+                     ("✖️ Отменить запись", "macro:cancel")])
+    else:
+        rows.append([("🎬 Записать кнопку-макрос", "macro:rec")])
+    rows.append([("📺 Канал +", "tv:ch_up"), ("📺 Канал −", "tv:ch_down")])
+    return ikb(rows)
+
+
 async def section_tv(update: Update, ctx) -> None:
     await update.message.reply_text(
-        "📺 <b>LG 50LF652V</b>\n<i>Раздел в разработке: коды стандартные для LG, "
-        "но на твоём телевизоре ещё не проверялись. Начни с «Питание».</i>",
+        "📺 <b>LG 50LF652V</b>",
         parse_mode=ParseMode.HTML,
-        reply_markup=ikb([
-            [("⏻ Питание", "tv:power"), ("🔇 Звук", "tv:mute")],
-            [("🔊 Громче", "tv:vol_up"), ("🔉 Тише", "tv:vol_down")],
-            [("📺 Канал +", "tv:ch_up"), ("📺 Канал −", "tv:ch_down")],
-            [("⬆️", "tv:up")],
-            [("⬅️", "tv:left"), ("OK", "tv:ok"), ("➡️", "tv:right")],
-            [("⬇️", "tv:down")],
-            [("🔌 Источник", "tv:input"), ("🏠 Меню", "tv:home")],
-            [("↩️ Назад", "tv:back"), ("✖️ Выход", "tv:exit")],
-        ]),
+        reply_markup=tv_kb(bool(ctx.user_data.get("macro_rec") is not None)),
     )
 
 
@@ -168,7 +180,7 @@ def settings_kb() -> InlineKeyboardMarkup:
 
     return ikb([
         [(f"{mark('notify_devices')} Устройства сети", "set:notify_devices")],
-        [(f"{mark('notify_networks')} Сети вокруг", "set:notify_networks")],
+        [(f"{mark('notify_networks', False)} Сети вокруг (по умолчанию тихо)", "set:notify_networks")],
         [(f"{mark('notify_power')} Питание", "set:notify_power")],
         [(f"{mark('notify_internet')} Интернет", "set:notify_internet")],
         [(f"{mark('notify_battery')} Заряд батареи", "set:notify_battery")],
@@ -214,6 +226,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         store.label_device(waiting[1], text)
         await update.message.reply_text(f"✏️ Устройство подписано: <b>{html.escape(text)}</b>",
                                         parse_mode=ParseMode.HTML)
+        return
+    if isinstance(waiting, tuple) and waiting[0] == "macro_name":
+        store.save_macro(text, waiting[1])
+        await update.message.reply_text(
+            f"🎬 Кнопка <b>{html.escape(text)}</b> сохранена — она появилась в разделе «Телевизор».",
+            parse_mode=ParseMode.HTML)
         return
     if isinstance(waiting, tuple) and waiting[0] == "label_net":
         store.label_network(waiting[1], text)
@@ -307,20 +325,69 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if data.startswith("tv:"):
         button = data.split(":", 1)[1]
         ok, msg = await ir.send(button)
+        rec = ctx.user_data.get("macro_rec")
+        if rec is not None and ok:
+            rec.append(button)
+            await q.answer(f"📺 {button} · записано ({len(rec)})")
+            return
         await q.answer("📺 " + (button if ok else msg[:60]), show_alert=not ok)
+        return
+
+    if data.startswith("macro:"):
+        what = data.split(":", 1)[1]
+        if what == "rec":
+            ctx.user_data["macro_rec"] = []
+            await q.answer("Запись пошла")
+            await q.edit_message_text(
+                "🎬 <b>Запись макроса</b>\nЖми кнопки как на обычном пульте — каждая уходит "
+                "на телевизор и запоминается. Когда дойдёшь куда надо, нажми «Сохранить».",
+                parse_mode=ParseMode.HTML, reply_markup=tv_kb(recording=True))
+            return
+        if what == "cancel":
+            ctx.user_data.pop("macro_rec", None)
+            await q.answer("Отменил")
+            await q.edit_message_text("📺 <b>LG 50LF652V</b>", parse_mode=ParseMode.HTML,
+                                      reply_markup=tv_kb())
+            return
+        if what == "save":
+            steps = ctx.user_data.get("macro_rec") or []
+            if not steps:
+                await q.answer("Пусто — сначала нажми хоть одну кнопку", show_alert=True)
+                return
+            ctx.user_data["await"] = ("macro_name", steps)
+            ctx.user_data.pop("macro_rec", None)
+            await q.answer()
+            await chat.send_message(
+                f"Записал {len(steps)} шагов. Как назвать кнопку? (например «YouTube»)")
+            return
+        if what.startswith("run:"):
+            name = what.split(":", 1)[1]
+            steps = store.macro_steps(name)
+            await q.answer(f"🎬 {name}: {len(steps)} шагов")
+            sent, failed = await ir.play_macro(steps)
+            if failed:
+                await chat.send_message("🎬 Сбой: " + "; ".join(failed[:3]))
+            return
         return
 
     if data.startswith("home:"):
         what = data.split(":", 1)[1]
-        await q.answer()
-        await chat.send_action(ChatAction.TYPING)
-        await home_report(chat, what)
+        await q.answer("Собираю…")
+        # termux-api calls take a few seconds each; say so instead of looking dead
+        note = await chat.send_message("⏳ Секунду…")
+        try:
+            await home_report(chat, what)
+        finally:
+            try:
+                await note.delete()
+            except Exception:
+                pass
         return
 
     if data.startswith("set:"):
         key = data.split(":", 1)[1]
         # motion and climate are opt-in, everything else is on unless turned off
-        default_on = key not in ("notify_motion", "notify_climate")
+        default_on = key not in ("notify_motion", "notify_climate", "notify_networks")
         store.set_flag(key, not store.flag(key, default_on))
         await q.answer("Переключил")
         await q.edit_message_reply_markup(reply_markup=settings_kb())
@@ -459,10 +526,15 @@ async def home_report(chat, what: str) -> None:
     elif what == "light":
         lux = await actions.light_level()
         if lux is None:
-            await chat.send_message("Датчик освещённости не ответил.")
+            await chat.send_message(
+                "Датчик освещённости не ответил. Иногда он занят системой — попробуй ещё раз.")
         else:
             mood = "темно" if lux < 10 else ("сумрак" if lux < 80 else "светло")
-            await chat.send_message(f"💡 <b>{lux:.0f} лк</b> — {mood}", parse_mode=ParseMode.HTML)
+            await chat.send_message(
+                f"💡 <b>{lux:.0f} лк</b> — {mood}\n"
+                f"<i>Датчик смотрит вверх рядом с динамиком: если телефон лежит экраном "
+                f"вниз или чем-то накрыт, будет темно независимо от лампы.</i>",
+                parse_mode=ParseMode.HTML)
 
     elif what == "status":
         b = await actions.battery()
