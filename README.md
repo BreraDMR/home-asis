@@ -81,10 +81,12 @@ the app properly through DIAL and relaunches it, and any YouTube link pasted
 into the chat opens straight in the player, skipping the app's own menus — on
 a set this old, those menus are usually what's hanging.
 
-**Waking it up is IR-only.** Measured on this set: in standby it powers down the
-Ethernet port completely — no ping, not even an ARP reply — so a magic packet has
-nothing to arrive at, and Wake-on-LAN cannot work no matter what is enabled in the
-menus (LG Connect Apps is on; there is no "Mobile TV On" item on this model).
+**Waking it up is IR-only.** Measured on this set, confirmed from the router's own
+status page: with the TV on, its port reads "Active 100 Mbps"; twenty seconds after
+a network power-off it reads "Inactive". Standby cuts power to the Ethernet chip, so
+a magic packet has nothing to arrive at and Wake-on-LAN cannot work whatever the menus
+say (LG Connect Apps is on; there is no "Mobile TV On" item on this model).
+After an IR power-on the TV is back on the network in about 40 seconds.
 The power button in the network remote therefore fires the IR blaster and says so
 on the button. Everything else stays on the network.
 
