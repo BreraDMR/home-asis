@@ -24,7 +24,7 @@ installed from the F-Droid/GitHub builds.
 | 🗣 Speak | Type text, the phone says it out loud in the room |
 | 🔦 Torch | Blink, hold the light on, vibrate |
 | 🚨 Find phone | Torch + full-volume speech + vibration at once |
-| 📺 TV | Infrared remote for an LG TV — **work in progress**, see below |
+| 📺 TV | Two separate remotes for the LG set: over the network, or over infrared |
 | 🏠 Home | Who's on the network, access points in range, thermometer, battery, light level, overall status |
 
 **Watchers (the phone messages you on its own)**
@@ -56,13 +56,37 @@ is closed to unprivileged apps on Android. Presence is done over Wi-Fi only:
 That last step is what makes it usable. Phones drop off the ARP table when
 they doze; without the grace period you'd get "left home" alerts all night.
 
-## The TV remote is unfinished
+## Two TV remotes, on purpose
 
-`ir.py` holds the standard LG NEC code set (address `0x20DF`) and a NEC encoder
-that expands a code into the microsecond mark/space pattern
-`termux-infrared-transmit` expects. The codes are the well-known ones for LG
-sets of that generation, but they have **not been fired at a real TV yet**.
-Test `power` first; if it works, the rest of the set almost certainly does too.
+The living-room LG (50LF652V, 2015) can be driven two ways, and the bot keeps
+them apart. Pick one in the 📺 section; neither ever silently falls back to the
+other, so a failure tells you which channel is broken.
+
+**Over the network — `tv.py`.** The set is on the router by cable, so we speak
+SSAP, LG's own WebSocket protocol on port 3000. This is the good one: launching
+apps by name, arrow keys and OK, volume with the level read back, input
+switching, typing into on-screen fields, and toasts on the TV. Pair once with
+
+```sh
+python pair_tv.py left ok
+```
+
+The TV puts an accept/deny dialog on screen; the arguments are the buttons to
+press on it through the IR blaster, because the focus does not start on "Yes".
+The client-key it returns is stored in `home.db` and every later connection is
+silent.
+
+Stuck YouTube gets its own two answers, both in the 📺 menu: *restart* stops
+the app properly through DIAL and relaunches it, and any YouTube link pasted
+into the chat opens straight in the player, skipping the app's own menus — on
+a set this old, those menus are usually what's hanging.
+
+**Over infrared — `ir.py`.** The standard LG NEC code set (address `0x20DF`)
+plus a NEC encoder that expands a code into the microsecond mark/space pattern
+`termux-infrared-transmit` wants. Confirmed working on the real set: power,
+mute, volume, OK, menu, input. There are no IR codes for apps, which is why
+recorded macros exist here. Keep it around for when the TV is off the network
+and for the pairing dialog above.
 
 ## Requirements
 
@@ -70,7 +94,7 @@ On the phone, inside Termux:
 
 ```sh
 pkg install python termux-api ffmpeg
-pip install python-telegram-bot
+pip install python-telegram-bot websockets
 ```
 
 `ffmpeg` is optional — without it, recordings are sent as audio files instead of
@@ -116,6 +140,8 @@ bot.py       menus, handlers, the button UI
 actions.py   thin wrappers over the termux-* binaries
 watchers.py  background loops that message you on events
 netscan.py   ping sweep + ARP + access point scan
-ir.py        NEC encoder and the LG code table
+ir.py        NEC encoder and the LG code table (infrared remote)
+tv.py        SSAP client for the same TV over the network
+pair_tv.py   one-off pairing helper, writes the client-key into home.db
 store.py     SQLite: labels, last-seen state, settings
 ```

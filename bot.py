@@ -30,6 +30,7 @@ import actions
 import ir
 import netscan
 import store
+import tv
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s", level=logging.INFO
@@ -131,6 +132,54 @@ async def section_say(update: Update, ctx) -> None:
     await update.message.reply_text("Напиши текст — телефон произнесёт его вслух.")
 
 
+# ---------------------------------------------------------------- tv
+
+# Two independent remotes for the same set: one over the network (SSAP), one
+# over the IR blaster. They never fall back to each other — if the network one
+# fails you get told, and you can walk over to the IR one yourself.
+
+_tv_session: tv.TV | None = None
+
+
+def tv_net() -> tv.TV | None:
+    """The SSAP session, or None if we've never been paired with the TV."""
+    global _tv_session
+    key = store.get("tv_client_key")
+    if not key:
+        return None
+    if _tv_session is None or _tv_session.key != key:
+        _tv_session = tv.TV(key=key)
+    return _tv_session
+
+
+def tv_net_kb() -> InlineKeyboardMarkup:
+    return ikb([
+        [("⏻ Включить", "tvn:on"), ("⏻ Выключить", "tvn:off")],
+        [("🔉 Тише", "tvn:vol_down"), ("🔇 Звук", "tvn:mute"), ("🔊 Громче", "tvn:vol_up")],
+        [("⬆️", "tvn:btn:UP")],
+        [("⬅️", "tvn:btn:LEFT"), ("OK", "tvn:btn:ENTER"), ("➡️", "tvn:btn:RIGHT")],
+        [("⬇️", "tvn:btn:DOWN")],
+        [("↩️ Назад", "tvn:btn:BACK"), ("🏠 Home", "tvn:btn:HOME"), ("📺 Каналы", "tvn:livetv")],
+        [("📱 Приложения", "tvn:apps"), ("🔌 Источник", "tvn:inputs")],
+        [("⌨️ Ввести текст", "tvn:type"), ("♻️ Перезапустить YouTube", "tvn:yt_restart")],
+        [("💬 Написать на экран", "tvn:toast"), ("ℹ️ Что на экране", "tvn:status")],
+        [("📡 Переключиться на ИК-пульт", "tvpick:ir")],
+    ])
+
+
+async def tv_net_message(chat) -> None:
+    if tv_net() is None:
+        await chat.send_message(
+            "Телевизор ещё не спарен по сети. На телефоне: "
+            "<code>cd ~/lab/homebot && python pair_tv.py left ok</code>",
+            parse_mode=ParseMode.HTML)
+        return
+    await chat.send_message(
+        "🌐 <b>Телевизор по сети</b>\nLG 50LF652V · 192.168.1.100\n"
+        "<i>Ссылку на YouTube можно просто прислать сюда — включится на телевизоре.</i>",
+        parse_mode=ParseMode.HTML, reply_markup=tv_net_kb())
+
+
 def tv_kb(recording: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [("⏻ Питание", "tv:power"), ("🔇 Звук", "tv:mute")],
@@ -155,9 +204,12 @@ def tv_kb(recording: bool = False) -> InlineKeyboardMarkup:
 
 async def section_tv(update: Update, ctx) -> None:
     await update.message.reply_text(
-        "📺 <b>LG 50LF652V</b>",
+        "📺 <b>LG 50LF652V</b>\nЧем управлять?",
         parse_mode=ParseMode.HTML,
-        reply_markup=tv_kb(bool(ctx.user_data.get("macro_rec") is not None)),
+        reply_markup=ikb([
+            [("🌐 По сети (кабель)", "tvpick:net")],
+            [("📡 По инфракрасному", "tvpick:ir")],
+        ]),
     )
 
 
@@ -222,6 +274,23 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "🗣 Сказал." if ok else "Не смог произнести — проверь громкость и TTS."
         )
         return
+    if waiting in ("tv_type", "tv_toast"):
+        t = tv_net()
+        if t is None:
+            await update.message.reply_text("Телевизор не спарен по сети.")
+            return
+        try:
+            if waiting == "tv_type":
+                await t.type_text(text)
+                await t.enter()
+                await update.message.reply_text("⌨️ Набрал и нажал Enter.")
+            else:
+                await t.toast(text)
+                await update.message.reply_text("💬 Показал на экране телевизора.")
+        except Exception as e:
+            await update.message.reply_text(f"Телевизор не принял: {e}")
+        return
+
     if isinstance(waiting, tuple) and waiting[0] == "label_dev":
         store.label_device(waiting[1], text)
         await update.message.reply_text(f"✏️ Устройство подписано: <b>{html.escape(text)}</b>",
@@ -242,6 +311,18 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     handler = SECTIONS.get(text)
     if handler:
         return await handler(update, ctx)
+
+    # A pasted YouTube link goes straight to the TV — this is the way around
+    # the app's own menus when they decide to hang on the loading spinner.
+    vid = tv.video_id(text)
+    if vid:
+        await update.message.chat.send_action(ChatAction.TYPING)
+        if await tv.youtube_play(vid):
+            await update.message.reply_text("▶️ Включаю на телевизоре.")
+        else:
+            await update.message.reply_text(
+                "Телевизор не принял ссылку — он вообще включён?")
+        return
 
     await update.message.reply_text("Не понял. Пользуйся кнопками снизу.", reply_markup=MAIN_KB)
 
@@ -320,6 +401,21 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 actions.say("Я здесь. Я здесь. Я здесь."),
                 actions.vibrate(3000),
             )
+        return
+
+    if data.startswith("tvpick:"):
+        await q.answer()
+        if data.endswith(":net"):
+            await tv_net_message(chat)
+        else:
+            await chat.send_message(
+                "📡 <b>ИК-пульт</b> — телефон светит в приёмник телевизора.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=tv_kb(bool(ctx.user_data.get("macro_rec") is not None)))
+        return
+
+    if data.startswith("tvn:"):
+        await tv_net_cb(q, ctx, data.split(":", 1)[1])
         return
 
     if data.startswith("tv:"):
@@ -432,6 +528,120 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await q.answer()
+
+
+async def tv_net_cb(q, ctx, what: str) -> None:
+    """Everything the wired remote can do. One place, one error style."""
+    chat = q.message.chat
+    t = tv_net()
+    if what == "on":
+        tv.wake()
+        await q.answer("⏻ Разбудил — телевизору нужна пара секунд")
+        return
+    if t is None:
+        await q.answer("Телевизор не спарен по сети", show_alert=True)
+        return
+
+    try:
+        if what == "off":
+            await t.turn_off()
+            await t.close()
+            await q.answer("⏻ Выключил")
+
+        elif what in ("vol_up", "vol_down"):
+            await (t.volume_up() if what == "vol_up" else t.volume_down())
+            level = (await t.volume()).get("volume", "?")
+            await q.answer(f"🔊 {level}")
+
+        elif what == "mute":
+            now_muted = bool((await t.volume()).get("muted"))
+            await t.mute(not now_muted)
+            await q.answer("🔊 Звук вернул" if now_muted else "🔇 Тишина")
+
+        elif what.startswith("btn:"):
+            name = what.split(":", 1)[1]
+            await t.button(name)
+            await q.answer(name)
+
+        elif what == "livetv":
+            await t.launch("com.webos.app.livetv")
+            await q.answer("📺 Телетрансляция")
+
+        elif what == "apps":
+            await q.answer("Спрашиваю телевизор…")
+            apps = [a for a in await t.apps() if not a.get("id", "").startswith("com.webos.app.hdmi")]
+            rows, pair = [], []
+            for a in apps[:20]:
+                pair.append((a.get("title") or a.get("id"), f"tvn:app:{a.get('id')}"))
+                if len(pair) == 2:
+                    rows.append(pair)
+                    pair = []
+            if pair:
+                rows.append(pair)
+            await chat.send_message("Что запустить?", reply_markup=ikb(rows))
+
+        elif what.startswith("app:"):
+            app_id = what.split(":", 1)[1]
+            await t.launch(app_id)
+            await q.answer("Запускаю…")
+
+        elif what == "inputs":
+            await q.answer()
+            devices = await t.inputs()
+            rows = [[(f"{'🟢' if d.get('connected') else '⚪️'} {d.get('label') or d.get('id')}",
+                      f"tvn:in:{d.get('id')}")] for d in devices]
+            await chat.send_message("Куда переключить?", reply_markup=ikb(rows))
+
+        elif what.startswith("in:"):
+            await t.switch_input(what.split(":", 1)[1])
+            await q.answer("🔌 Переключил")
+
+        elif what == "yt_restart":
+            await q.answer("Перезапускаю…")
+            note = await chat.send_message("♻️ Выгружаю YouTube…")
+            await tv.youtube_stop()
+            await asyncio.sleep(4)
+            await t.launch(tv.YOUTUBE_ID)
+            await asyncio.sleep(6)
+            state = await tv.dial_state()
+            await note.edit_text(
+                f"♻️ YouTube перезапущен · сейчас <b>{state or 'не отвечает'}</b>\n"
+                "<i>Если снова повиснет — пришли сюда ссылку, видео откроется мимо меню.</i>",
+                parse_mode=ParseMode.HTML)
+
+        elif what == "type":
+            ctx.user_data["await"] = "tv_type"
+            await q.answer()
+            await chat.send_message(
+                "Открой на телевизоре поле ввода (например поиск в YouTube) и пришли мне текст — "
+                "я наберу его и нажму Enter.")
+
+        elif what == "toast":
+            ctx.user_data["await"] = "tv_toast"
+            await q.answer()
+            await chat.send_message("Что написать на экране телевизора?")
+
+        elif what == "status":
+            await q.answer("Смотрю…")
+            fg = await t.foreground()
+            vol = await t.volume()
+            yt = await tv.dial_state()
+            app_id = fg.get("appId") or "—"
+            titles = {a.get("id"): a.get("title") for a in await t.apps()}
+            await chat.send_message(
+                f"ℹ️ <b>Телевизор</b>\n"
+                f"На экране: <b>{html.escape(titles.get(app_id) or app_id)}</b>\n"
+                f"Громкость: {vol.get('volume', '?')}{' · без звука' if vol.get('muted') else ''}\n"
+                f"YouTube: {yt or 'не отвечает'}",
+                parse_mode=ParseMode.HTML)
+
+    except tv.TVError as e:
+        await q.answer(f"Телевизор ответил: {e}"[:190], show_alert=True)
+    except asyncio.TimeoutError:
+        await q.answer("Телевизор молчит — он выключен?", show_alert=True)
+    except Exception as e:
+        log.warning("сеть ТВ: %s", e)
+        await q.answer(f"Не вышло: {type(e).__name__}", show_alert=True)
 
 
 async def home_report(chat, what: str) -> None:
