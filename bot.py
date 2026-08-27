@@ -154,7 +154,7 @@ def tv_net() -> tv.TV | None:
 
 def tv_net_kb() -> InlineKeyboardMarkup:
     return ikb([
-        [("⏻ Включить", "tvn:on"), ("⏻ Выключить", "tvn:off")],
+        [("⏻ Включить (ИК)", "tvn:on"), ("⏻ Выключить", "tvn:off")],
         [("🔉 Тише", "tvn:vol_down"), ("🔇 Звук", "tvn:mute"), ("🔊 Громче", "tvn:vol_up")],
         [("⬆️", "tvn:btn:UP")],
         [("⬅️", "tvn:btn:LEFT"), ("OK", "tvn:btn:ENTER"), ("➡️", "tvn:btn:RIGHT")],
@@ -176,7 +176,9 @@ async def tv_net_message(chat) -> None:
         return
     await chat.send_message(
         "🌐 <b>Телевизор по сети</b>\nLG 50LF652V · 192.168.1.100\n"
-        "<i>Ссылку на YouTube можно просто прислать сюда — включится на телевизоре.</i>",
+        "<i>Ссылку на YouTube можно просто прислать сюда — включится на телевизоре.\n"
+        "Включение идёт по ИК: спящий телевизор глушит сетевой порт и разбудить "
+        "его по кабелю невозможно.</i>",
         parse_mode=ParseMode.HTML, reply_markup=tv_net_kb())
 
 
@@ -535,8 +537,22 @@ async def tv_net_cb(q, ctx, what: str) -> None:
     chat = q.message.chat
     t = tv_net()
     if what == "on":
-        tv.wake()
-        await q.answer("⏻ Разбудил — телевизору нужна пара секунд")
+        # The set kills its Ethernet port in standby — it doesn't even answer ARP,
+        # so there is nothing left to receive a magic packet. Measured, not guessed.
+        # The IR blaster is the only way in while it's asleep, so the button says so.
+        tv.wake()  # harmless, and works if the TV ever gains a network-standby mode
+        ok, msg = await ir.send("power")
+        await q.answer("⏻ Включаю по ИК…" if ok else f"ИК не сработал: {msg}"[:190],
+                       show_alert=not ok)
+        if ok:
+            for _ in range(12):
+                await asyncio.sleep(3)
+                if await tv.reachable():
+                    await chat.send_message("📺 Телевизор проснулся, сеть на связи.")
+                    return
+            await chat.send_message(
+                "📺 Экран должен был включиться, но по сети телевизор пока не отвечает — "
+                "дай ему полминуты.")
         return
     if t is None:
         await q.answer("Телевизор не спарен по сети", show_alert=True)

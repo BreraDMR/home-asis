@@ -233,17 +233,27 @@ class TV:
 
 # ---------- helpers that don't need a session ----------
 
-def wake(mac: str = TV_MAC) -> None:
-    """Wake-on-LAN. Works now that the set is on cable — over Wi-Fi it never did."""
+def wake(mac: str = TV_MAC, repeat: int = 3) -> None:
+    """Wake-on-LAN. Only possible now that the set is on cable — over Wi-Fi it never was.
+
+    Some routers drop the all-ones broadcast but happily forward the subnet one,
+    so we send to both, on both of the usual ports, a few times over. The TV
+    still has to have "Mobile TV On" enabled or none of this reaches anything.
+    """
     raw = bytes.fromhex(mac.replace(":", "").replace("-", ""))
     packet = b"\xff" * 6 + raw * 16
-    for port in (9, 7):
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        try:
-            s.sendto(packet, ("255.255.255.255", port))
-        finally:
-            s.close()
+    targets = [("255.255.255.255", 9), ("255.255.255.255", 7),
+               ("192.168.1.255", 9), ("192.168.1.255", 7)]
+    for _ in range(repeat):
+        for host, port in targets:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            try:
+                s.sendto(packet, (host, port))
+            except OSError:
+                pass  # no route for that broadcast, try the next one
+            finally:
+                s.close()
 
 
 async def reachable(ip: str = TV_IP, timeout: float = 1.5) -> bool:

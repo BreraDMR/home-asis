@@ -81,6 +81,13 @@ the app properly through DIAL and relaunches it, and any YouTube link pasted
 into the chat opens straight in the player, skipping the app's own menus — on
 a set this old, those menus are usually what's hanging.
 
+**Waking it up is IR-only.** Measured on this set: in standby it powers down the
+Ethernet port completely — no ping, not even an ARP reply — so a magic packet has
+nothing to arrive at, and Wake-on-LAN cannot work no matter what is enabled in the
+menus (LG Connect Apps is on; there is no "Mobile TV On" item on this model).
+The power button in the network remote therefore fires the IR blaster and says so
+on the button. Everything else stays on the network.
+
 **Over infrared — `ir.py`.** The standard LG NEC code set (address `0x20DF`)
 plus a NEC encoder that expands a code into the microsecond mark/space pattern
 `termux-infrared-transmit` wants. Confirmed working on the real set: power,
