@@ -61,6 +61,14 @@ def init() -> None:
             key TEXT PRIMARY KEY,
             value TEXT
         )""")
+        # One row per came/went event. That's all the "who's home" chart needs:
+        # the bars between two events are just the state that held in between.
+        c.execute("""CREATE TABLE IF NOT EXISTS presence (
+            ts INTEGER NOT NULL,
+            mac TEXT NOT NULL,
+            online INTEGER NOT NULL
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS presence_ts ON presence(ts)")
 
 
 def get(key: str, default: str | None = None) -> str | None:
@@ -95,6 +103,7 @@ def now() -> str:
 def seen_devices(found: dict[str, str]) -> tuple[list[dict], list[dict]]:
     """Feed in {mac: ip}. Returns (appeared, disappeared) as row dicts."""
     appeared, gone = [], []
+    stamp = int(time.time())
     with conn() as c:
         known = {r["mac"]: dict(r) for r in c.execute("SELECT * FROM devices")}
         for mac, ip in found.items():
@@ -104,9 +113,11 @@ def seen_devices(found: dict[str, str]) -> tuple[list[dict], list[dict]]:
                     "INSERT INTO devices(mac,label,last_ip,first_seen,last_seen,online) VALUES(?,?,?,?,?,1)",
                     (mac, None, ip, now(), now()),
                 )
+                c.execute("INSERT INTO presence(ts,mac,online) VALUES(?,?,1)", (stamp, mac))
                 appeared.append({"mac": mac, "label": None, "last_ip": ip, "is_new": True})
             else:
                 if not row["online"]:
+                    c.execute("INSERT INTO presence(ts,mac,online) VALUES(?,?,1)", (stamp, mac))
                     appeared.append({**row, "last_ip": ip, "is_new": False})
                 c.execute(
                     "UPDATE devices SET last_ip=?, last_seen=?, online=1 WHERE mac=?",
@@ -115,8 +126,39 @@ def seen_devices(found: dict[str, str]) -> tuple[list[dict], list[dict]]:
         for mac, row in known.items():
             if row["online"] and mac not in found:
                 c.execute("UPDATE devices SET online=0 WHERE mac=?", (mac,))
+                c.execute("INSERT INTO presence(ts,mac,online) VALUES(?,?,0)", (stamp, mac))
                 gone.append(row)
     return appeared, gone
+
+
+def presence_since(since_ts: int) -> list[dict]:
+    """Came/went events newer than a timestamp, oldest first."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT ts,mac,online FROM presence WHERE ts>=? ORDER BY ts", (since_ts,)
+        )
+        return [dict(r) for r in rows]
+
+
+def presence_state_at(ts: int) -> dict[str, bool]:
+    """Who was online at a given moment — the last event before it, per device.
+
+    Needed because a device that has been home for three days has no event
+    inside the chart window, and would otherwise be drawn as absent.
+    """
+    with conn() as c:
+        rows = c.execute(
+            "SELECT mac, online FROM presence p WHERE ts = ("
+            "  SELECT MAX(ts) FROM presence WHERE mac = p.mac AND ts < ?"
+            ") GROUP BY mac", (ts,)
+        )
+        return {r["mac"]: bool(r["online"]) for r in rows}
+
+
+def presence_trim(keep_days: int = 30) -> None:
+    cutoff = int(time.time()) - keep_days * 86400
+    with conn() as c:
+        c.execute("DELETE FROM presence WHERE ts < ?", (cutoff,))
 
 
 def device_list(online_only: bool = False) -> list[dict]:

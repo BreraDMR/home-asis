@@ -117,6 +117,26 @@ async def scan_networks() -> dict[str, dict]:
     return out
 
 
-async def internet_up(host: str = "1.1.1.1") -> bool:
-    code, out, _ = await run(["ping", "-c", "1", "-W", "2", "-q", host], timeout=6)
-    return code == 0
+async def internet_up() -> bool:
+    """Is there a way out to the internet?
+
+    Used to be a ping to 1.1.1.1, and that lied: ICMP echo replies never make
+    it back to Termux on this phone (measured 28.08.2026 — even the router
+    itself doesn't answer), so the bot reported "no internet" while happily
+    talking to Telegram over the same wifi. A plain TCP connect tells the
+    truth, and doesn't depend on ICMP being allowed anywhere along the way.
+    """
+    for host, port in (("1.1.1.1", 443), ("8.8.8.8", 53), ("api.telegram.org", 443)):
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=4
+            )
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            continue
+    return False

@@ -43,10 +43,17 @@ async def run_json(cmd: list[str], timeout: int = 30):
 
 # ---------- camera ----------
 
+# Android hands the camera to one caller at a time. Now that the timelapse
+# recorder is asking for a frame every few seconds, a manual photo would land
+# right on top of it and both would come back empty — so everyone queues here.
+CAMERA = asyncio.Lock()
+
+
 async def photo(camera_id: str = "0") -> str | None:
     """Snap a picture. Returns path or None. camera 0 = back, 1 = front."""
-    path = os.path.join(TMP, f"shot_{camera_id}_{int(time.time())}.jpg")
-    code, _, err = await run(["termux-camera-photo", "-c", camera_id, path], timeout=45)
+    path = os.path.join(TMP, f"shot_{camera_id}_{int(time.time() * 1000)}.jpg")
+    async with CAMERA:
+        code, _, err = await run(["termux-camera-photo", "-c", camera_id, path], timeout=45)
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return path
     return None
@@ -143,13 +150,22 @@ LIGHT_SENSOR = "LTR579 ALSPS -Wakeup Secondary"
 
 
 async def light_level() -> float | None:
-    """Ambient light in lux. Averages a few samples — the sensor is jittery."""
-    data = await run_json(["termux-sensor", "-s", LIGHT_SENSOR, "-n", "3"], timeout=30)
-    if not data:
-        return None
-    for key, vals in data.items():
-        if isinstance(vals, dict) and vals.get("values"):
-            return float(vals["values"][0])
+    """Ambient light in lux, or None if the sensor really won't answer.
+
+    termux-sensor keeps one listener per process and leaves it registered if a
+    previous call died halfway; the next call then comes back empty and the bot
+    used to just shrug and say "sensor busy". So: clean up any stale listener
+    first, and give it a couple of tries before giving up.
+    """
+    for attempt in (1, 2, 3):
+        data = await run_json(["termux-sensor", "-s", LIGHT_SENSOR, "-n", "3"], timeout=30)
+        if data:
+            for key, vals in data.items():
+                if isinstance(vals, dict) and vals.get("values"):
+                    return float(vals["values"][0])
+        if attempt < 3:
+            await run(["termux-sensor", "-c"], timeout=15)
+            await asyncio.sleep(1.0)
     return None
 
 
