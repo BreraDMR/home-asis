@@ -1172,8 +1172,13 @@ def _draw_presence(hours: int, path: str) -> bool:
     if not names:
         return False
     fig, ax = plt.subplots(figsize=(9, 0.5 * len(names) + 1.6), dpi=110)
+    # a two-minute visit is a hairline on a week-long axis — floor the width so
+    # short appearances stay visible instead of vanishing into the grid
+    floor = hours / 400
     for i, bars in enumerate(spans):
-        ax.broken_barh(bars, (i - 0.35, 0.7), facecolors="#3aa675")
+        ax.broken_barh([(0, hours)], (i - 0.35, 0.7), facecolors="#eceff1")
+        ax.broken_barh([(s, max(w, floor)) for s, w in bars], (i - 0.35, 0.7),
+                       facecolors="#3aa675")
     ax.set_yticks(range(len(names)))
     ax.set_yticklabels(names, fontsize=9)
     ax.set_xlim(0, hours)
@@ -1383,6 +1388,7 @@ async def post_init(app: Application) -> None:
 
     app.bot_data["watchers"] = watchers.start_all(send)
     app.bot_data["timelapse"] = asyncio.create_task(timelapse.recorder(send))
+    store.presence_seed()
     store.presence_trim()
     log.info("сторож запущен: %d наблюдателей, таймлапс раз в %d с",
              len(app.bot_data["watchers"]), timelapse.interval())

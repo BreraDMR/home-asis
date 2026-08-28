@@ -155,6 +155,21 @@ def presence_state_at(ts: int) -> dict[str, bool]:
         return {r["mac"]: bool(r["online"]) for r in rows}
 
 
+def presence_seed() -> None:
+    """Write down who is online right now, if the log has nothing at all yet.
+
+    Without this the chart is blank until somebody's phone happens to leave
+    the flat — every device that was already home has no event to draw from.
+    """
+    with conn() as c:
+        if c.execute("SELECT 1 FROM presence LIMIT 1").fetchone():
+            return
+        stamp = int(time.time())
+        online = [r["mac"] for r in c.execute("SELECT mac FROM devices WHERE online=1")]
+        for mac in online:
+            c.execute("INSERT INTO presence(ts,mac,online) VALUES(?,?,1)", (stamp, mac))
+
+
 def presence_trim(keep_days: int = 30) -> None:
     cutoff = int(time.time()) - keep_days * 86400
     with conn() as c:
