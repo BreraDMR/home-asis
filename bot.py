@@ -6,9 +6,11 @@ inline keyboards for the actual actions.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import html
 import logging
 import os
+import time
 
 from telegram import (
     InlineKeyboardButton,
@@ -30,6 +32,7 @@ import actions
 import ir
 import netscan
 import store
+import timelapse
 import tv
 
 logging.basicConfig(
@@ -44,16 +47,20 @@ OWNERS = {int(x) for x in os.environ.get("HOMEBOT_OWNERS", "").replace(" ", "").
 
 # ---------------------------------------------------------------- keyboard
 
-BTN_CAM, BTN_MIC = "📷 Камера", "🎤 Слушать"
-BTN_LIGHT, BTN_SAY = "🔦 Свет", "🗣 Сказать"
-BTN_TV, BTN_HOME = "📺 Телевизор", "🏠 Дом"
+# The two cameras sit right on the main keyboard: picking "camera" and then
+# picking which camera was two taps for the thing you do most often.
+BTN_BACK_CAM, BTN_FRONT_CAM = "📷 Задняя", "🤳 Фронтальная"
+BTN_TIMELAPSE, BTN_STATUS = "📹 Таймлапс", "📊 Статус"
+BTN_TV, BTN_WHO = "📺 Телевизор", "👥 Кто дома"
+BTN_HOME, BTN_NETS = "🏠 Дом", "📶 Сети"
 BTN_SETTINGS = "⚙️ Настройки"
 
 MAIN_KB = ReplyKeyboardMarkup(
     [
-        [KeyboardButton(BTN_CAM), KeyboardButton(BTN_MIC)],
-        [KeyboardButton(BTN_LIGHT), KeyboardButton(BTN_SAY)],
-        [KeyboardButton(BTN_TV), KeyboardButton(BTN_HOME)],
+        [KeyboardButton(BTN_BACK_CAM), KeyboardButton(BTN_FRONT_CAM)],
+        [KeyboardButton(BTN_TIMELAPSE), KeyboardButton(BTN_STATUS)],
+        [KeyboardButton(BTN_TV), KeyboardButton(BTN_WHO)],
+        [KeyboardButton(BTN_HOME), KeyboardButton(BTN_NETS)],
         [KeyboardButton(BTN_SETTINGS)],
     ],
     resize_keyboard=True,
@@ -96,14 +103,29 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def section_camera(update: Update, ctx) -> None:
-    await update.message.reply_text(
-        "Какой камерой снять?",
-        reply_markup=ikb([
-            [("📷 Задняя", "cam:0"), ("🤳 Фронтальная", "cam:1")],
-            [("📷🤳 Обе сразу", "cam:both")],
-        ]),
-    )
+async def shoot(chat, camera_id: str) -> None:
+    """One photo, straight away — no menu in between."""
+    await chat.send_action(ChatAction.UPLOAD_PHOTO)
+    path = await actions.photo(camera_id)
+    if not path:
+        await chat.send_message(
+            "Камера не отдала снимок. Обычно это разрешение или занятая камера — "
+            "таймлапс снимает раз в несколько секунд, попробуй ещё раз.")
+        return
+    with open(path, "rb") as fh:
+        await chat.send_photo(fh, caption="📷 задняя" if camera_id == "0" else "🤳 фронтальная")
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+async def section_back_cam(update: Update, ctx) -> None:
+    await shoot(update.message.chat, "0")
+
+
+async def section_front_cam(update: Update, ctx) -> None:
+    await shoot(update.message.chat, "1")
 
 
 async def section_mic(update: Update, ctx) -> None:
@@ -216,16 +238,110 @@ async def section_tv(update: Update, ctx) -> None:
 
 
 async def section_home(update: Update, ctx) -> None:
+    """Everything that isn't needed several times a day lives in here."""
     await update.message.reply_text(
-        "Что показать по дому?",
+        "🏠 <b>Дом</b>",
+        parse_mode=ParseMode.HTML,
         reply_markup=ikb([
-            [("👥 Кто дома", "home:devices"), ("📶 Сети рядом", "home:networks")],
-            [("🌡 Термометр", "home:temp"), ("🔋 Батарея", "home:batt")],
-            [("💡 Освещённость", "home:light"), ("📊 Статус", "home:status")],
-            [("📜 Журнал сетей", "home:netlog"), ("📜 Журнал устройств", "home:devlog")],
+            [("🎤 Слушать", "home:mic"), ("🗣 Сказать", "home:say")],
+            [("🔦 Свет", "home:torch"), ("🚨 Найти телефон", "torch:find")],
+            [("📈 График «Кто дома»", "home:chart")],
+        ]),
+    )
+
+
+async def section_nets(update: Update, ctx) -> None:
+    await update.message.reply_text(
+        "📶 <b>Сети</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=ikb([
+            [("📡 Сети рядом", "home:networks")],
+            [("📜 Журнал устройств", "home:devlog"), ("📜 Журнал сетей", "home:netlog")],
             [("✏️ Подписать устройство", "label:dev"), ("✏️ Подписать сеть", "label:net")],
         ]),
     )
+
+
+async def section_status(update: Update, ctx) -> None:
+    chat = update.message.chat
+    note = await chat.send_message("⏳ Опрашиваю датчики…")
+    try:
+        await home_report(chat, "status")
+    finally:
+        try:
+            await note.delete()
+        except Exception:
+            pass
+
+
+async def section_who(update: Update, ctx) -> None:
+    chat = update.message.chat
+    note = await chat.send_message("⏳ Сканирую сеть…")
+    try:
+        await home_report(chat, "devices")
+    finally:
+        try:
+            await note.delete()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------- timelapse
+
+def _ago(seconds: float) -> str:
+    m = int(seconds // 60)
+    if m < 60:
+        return f"{m} мин"
+    h, m = divmod(m, 60)
+    if h < 24:
+        return f"{h} ч {m} мин"
+    return f"{h // 24} сут {h % 24} ч"
+
+
+def timelapse_kb() -> InlineKeyboardMarkup:
+    on = timelapse.enabled()
+    return ikb([
+        [("⏸ Остановить запись" if on else "▶️ Включить запись", "tl:toggle")],
+        [("30 сек", "tl:clip:30"), ("1 мин", "tl:clip:60"),
+         ("2 мин", "tl:clip:120"), ("3 мин", "tl:clip:180")],
+        [("10 мин", "tl:clip:600"), ("30 мин", "tl:clip:1800"), ("1 час", "tl:clip:3600")],
+        [("🕐 Кадр по времени", "tl:attime"), ("🖼 Последний кадр", "tl:last")],
+        [(f"⏱ Интервал: {timelapse.interval()} сек", "tl:interval")],
+        [("⚙️ Настройки записи", "tl:setup"), ("📊 Архив", "tl:stats")],
+    ])
+
+
+def timelapse_text() -> str:
+    span = timelapse.bounds()
+    if span:
+        oldest, newest = span
+        depth = (f"глубина {_ago(time.time() - oldest)} · "
+                 f"последний кадр {time.strftime('%H:%M:%S', time.localtime(newest))}")
+    else:
+        depth = "архив пока пуст"
+    state = "🔴 пишет" if timelapse.enabled() else "⏸ остановлен"
+    return (f"📹 <b>Таймлапс</b> — {state}\n"
+            f"Кадр раз в {timelapse.interval()} сек · {depth}\n"
+            f"<i>Старое стирается само, когда архив дорастает до "
+            f"{timelapse.limit_mb() // 1024} ГБ.</i>")
+
+
+async def section_timelapse(update: Update, ctx) -> None:
+    await update.message.reply_text(timelapse_text(), parse_mode=ParseMode.HTML,
+                                    reply_markup=timelapse_kb())
+
+
+def tl_setup_kb() -> InlineKeyboardMarkup:
+    cam = "задняя" if timelapse.camera() == "0" else "фронтальная"
+    px = timelapse.width()
+    quality = {640: "экономно", 960: "средне", 1280: "детально", 1600: "максимум"}
+    return ikb([
+        [(f"📷 Камера: {cam}", "tl:set:cam")],
+        [(f"🖼 Качество: {quality.get(px, px)} ({px}px)", "tl:set:px")],
+        [(f"🔄 Поворот кадра: {timelapse.rotate()}°", "tl:set:rot")],
+        [(f"💾 Лимит архива: {timelapse.limit_mb() // 1024} ГБ", "tl:set:limit")],
+        [("↩️ Назад", "tl:menu")],
+    ])
 
 
 def settings_kb() -> InlineKeyboardMarkup:
@@ -250,14 +366,44 @@ async def section_settings(update: Update, ctx) -> None:
 
 
 SECTIONS = {
-    BTN_CAM: section_camera,
-    BTN_MIC: section_mic,
-    BTN_LIGHT: section_light,
-    BTN_SAY: section_say,
+    BTN_BACK_CAM: section_back_cam,
+    BTN_FRONT_CAM: section_front_cam,
+    BTN_TIMELAPSE: section_timelapse,
+    BTN_STATUS: section_status,
     BTN_TV: section_tv,
+    BTN_WHO: section_who,
     BTN_HOME: section_home,
+    BTN_NETS: section_nets,
     BTN_SETTINGS: section_settings,
 }
+
+
+def parse_moment(text: str) -> float | None:
+    """Turn '15:10', '27.08 15:10' or '27.08.2026 15:10:30' into a timestamp.
+
+    A bare time means today, unless that's still in the future — then it means
+    yesterday, which is what you actually mean when you ask at one in the
+    morning what the kitchen looked like at 23:40.
+    """
+    text = text.strip().replace(",", " ")
+    now = dt.datetime.now()
+    for fmt, has_date in (("%d.%m.%Y %H:%M:%S", True), ("%d.%m.%Y %H:%M", True),
+                          ("%d.%m %H:%M:%S", True), ("%d.%m %H:%M", True),
+                          ("%H:%M:%S", False), ("%H:%M", False)):
+        try:
+            got = dt.datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        if has_date:
+            if got.year == 1900:
+                got = got.replace(year=now.year)
+        else:
+            got = now.replace(hour=got.hour, minute=got.minute,
+                              second=got.second, microsecond=0)
+            if got > now:
+                got -= dt.timedelta(days=1)
+        return got.timestamp()
+    return None
 
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -276,6 +422,29 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "🗣 Сказал." if ok else "Не смог произнести — проверь громкость и TTS."
         )
         return
+    if waiting == "tl_time":
+        moment = parse_moment(text)
+        if moment is None:
+            await update.message.reply_text(
+                "Не разобрал время. Жду что-то вроде <code>15:10</code> "
+                "или <code>27.08 15:10</code>.", parse_mode=ParseMode.HTML)
+            ctx.user_data["await"] = "tl_time"
+            return
+        frames = await asyncio.to_thread(timelapse.nearest, moment, 3)
+        if not frames:
+            span = timelapse.bounds()
+            have = (f"Архив держит период с "
+                    f"{time.strftime('%d.%m %H:%M', time.localtime(span[0]))} по "
+                    f"{time.strftime('%d.%m %H:%M', time.localtime(span[1]))}."
+                    if span else "Архив пока пуст.")
+            await update.message.reply_text(f"На это время кадров нет. {have}")
+            return
+        asked = time.strftime("%d.%m %H:%M:%S", time.localtime(moment))
+        await update.message.reply_text(f"🕐 Ближайшее к <b>{asked}</b>:",
+                                        parse_mode=ParseMode.HTML)
+        await send_frames(update.message.chat, frames, "🕐")
+        return
+
     if waiting in ("tv_type", "tv_toast"):
         t = tv_net()
         if t is None:
@@ -338,19 +507,13 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     data = q.data or ""
     chat = q.message.chat
 
-    if data.startswith("cam:"):
-        which = data.split(":", 1)[1]
-        await q.answer("Снимаю…")
-        ids = ["0", "1"] if which == "both" else [which]
-        for cid in ids:
-            await chat.send_action(ChatAction.UPLOAD_PHOTO)
-            path = await actions.photo(cid)
-            if path:
-                with open(path, "rb") as fh:
-                    await chat.send_photo(fh, caption="📷 задняя" if cid == "0" else "🤳 фронтальная")
-                os.remove(path)
-            else:
-                await chat.send_message("Камера не отдала снимок (разрешение? занята другим приложением?)")
+    if data.startswith("tl:"):
+        await timelapse_cb(q, ctx, data.split(":", 1)[1])
+        return
+
+    if data.startswith("chart:"):
+        await q.answer("Рисую…")
+        await presence_chart(chat, int(data.split(":", 1)[1]))
         return
 
     if data.startswith("rec:"):
@@ -468,6 +631,25 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         return
 
+    # these three just open another keyboard — no sensors to wait for
+    if data in ("home:mic", "home:torch", "home:say"):
+        what = data.split(":", 1)[1]
+        await q.answer()
+        if what == "mic":
+            await chat.send_message("Что послушать?", reply_markup=ikb([
+                [("🎤 10 сек", "rec:10"), ("🎤 30 сек", "rec:30")],
+                [("📝 Распознать речь", "stt:1")],
+            ]))
+        elif what == "torch":
+            await chat.send_message("Вспышка и сигналы:", reply_markup=ikb([
+                [("💡 Мигнуть", "torch:blink"), ("🔦 Включить", "torch:on")],
+                [("🌑 Выключить", "torch:off"), ("📳 Вибро", "torch:vibe")],
+            ]))
+        else:
+            ctx.user_data["await"] = "say"
+            await chat.send_message("Напиши текст — телефон произнесёт его вслух.")
+        return
+
     if data.startswith("home:"):
         what = data.split(":", 1)[1]
         await q.answer("Собираю…")
@@ -527,6 +709,147 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         ctx.user_data["await"] = ("label_net", data.split(":", 1)[1])
         await q.answer()
         await chat.send_message("Напиши название для этой сети.")
+        return
+
+    await q.answer()
+
+
+async def send_frames(chat, frames: list, header: str) -> None:
+    """Post a handful of archive frames, each captioned with its own time."""
+    for ts, path in frames:
+        try:
+            with open(path, "rb") as fh:
+                await chat.send_photo(
+                    fh, caption=f"{header} {time.strftime('%H:%M:%S', time.localtime(ts))}")
+        except OSError:
+            await chat.send_message("Кадр уже стёрт кольцевой записью.")
+
+
+async def timelapse_cb(q, ctx, what: str) -> None:
+    chat = q.message.chat
+
+    if what == "toggle":
+        store.set_flag("tl_on", not timelapse.enabled())
+        await q.answer("Запись пошла" if timelapse.enabled() else "Запись остановлена")
+        await q.edit_message_text(timelapse_text(), parse_mode=ParseMode.HTML,
+                                  reply_markup=timelapse_kb())
+        return
+
+    if what == "menu":
+        await q.answer()
+        await q.edit_message_text(timelapse_text(), parse_mode=ParseMode.HTML,
+                                  reply_markup=timelapse_kb())
+        return
+
+    if what.startswith("clip:"):
+        seconds = int(what.split(":", 1)[1])
+        await q.answer("Собираю…")
+        note = await chat.send_message("⏳ Склеиваю кадры…")
+        try:
+            path, used, available = await timelapse.clip(seconds)
+            if not path:
+                await note.edit_text(
+                    "За этот промежуток кадров нет. Запись включена? "
+                    f"Интервал сейчас {timelapse.interval()} сек — "
+                    "за 30 секунд в него попадает всего пара кадров.")
+                return
+            thinned = (f" из {available}" if available > used else "")
+            await chat.send_action(ChatAction.UPLOAD_VIDEO)
+            with open(path, "rb") as fh:
+                await chat.send_animation(
+                    fh, caption=f"📹 последние {_ago(seconds) if seconds >= 60 else f'{seconds} сек'} "
+                                f"· {used} кадров{thinned}")
+            os.remove(path)
+            await note.delete()
+        except Exception as e:
+            log.warning("клип: %s", e)
+            await note.edit_text(f"Не собралось: {type(e).__name__}")
+        return
+
+    if what == "last":
+        await q.answer()
+        span = timelapse.bounds()
+        if not span:
+            await chat.send_message("Архив пуст — запись ещё не сделала ни одного кадра.")
+            return
+        frames = timelapse.nearest(span[1], 1)
+        await send_frames(chat, frames, "🖼")
+        return
+
+    if what == "attime":
+        ctx.user_data["await"] = "tl_time"
+        await q.answer()
+        await chat.send_message(
+            "Во сколько посмотреть? Напиши время — например <code>15:10</code>.\n"
+            "<i>Верну три ближайших кадра. Можно и с датой: <code>27.08 15:10</code>.</i>",
+            parse_mode=ParseMode.HTML)
+        return
+
+    if what == "interval":
+        await q.answer()
+        cur = timelapse.interval()
+        row = [(f"{'▶️ ' if s == cur else ''}{s} сек", f"tl:iv:{s}")
+               for s in timelapse.INTERVALS]
+        await q.edit_message_text(
+            "⏱ <b>Как часто снимать?</b>\n"
+            "<i>Съёмка кадра занимает около трёх секунд, так что 5 сек — это почти "
+            "непрерывная работа камеры: греется и ест батарею. 20 сек — спокойный режим.</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ikb([row[:3], row[3:], [("↩️ Назад", "tl:menu")]]))
+        return
+
+    if what.startswith("iv:"):
+        store.put("tl_interval", what.split(":", 1)[1])
+        await q.answer(f"Теперь раз в {timelapse.interval()} сек")
+        await q.edit_message_text(timelapse_text(), parse_mode=ParseMode.HTML,
+                                  reply_markup=timelapse_kb())
+        return
+
+    if what == "setup":
+        await q.answer()
+        await q.edit_message_text("⚙️ <b>Настройки записи</b>", parse_mode=ParseMode.HTML,
+                                  reply_markup=tl_setup_kb())
+        return
+
+    if what.startswith("set:"):
+        # every one of these just steps to the next value in a short list
+        key = what.split(":", 1)[1]
+        if key == "cam":
+            store.put("tl_camera", "1" if timelapse.camera() == "0" else "0")
+        elif key == "px":
+            steps = [640, 960, 1280, 1600]
+            store.put("tl_width", steps[(steps.index(timelapse.width()) + 1) % len(steps)]
+                      if timelapse.width() in steps else 1280)
+        elif key == "rot":
+            store.put("tl_rotate", (timelapse.rotate() + 90) % 360)
+        elif key == "limit":
+            steps = [1024, 2048, 5120, 7168]
+            store.put("tl_limit_mb", steps[(steps.index(timelapse.limit_mb()) + 1) % len(steps)]
+                      if timelapse.limit_mb() in steps else 5120)
+        await q.answer("Поменял")
+        await q.edit_message_reply_markup(reply_markup=tl_setup_kb())
+        return
+
+    if what == "stats":
+        await q.answer("Считаю…")
+        span = await asyncio.to_thread(timelapse.bounds)
+        frames = await asyncio.to_thread(timelapse.count)
+        size = await asyncio.to_thread(timelapse.archive_size_mb)
+        if span:
+            oldest, newest = span
+            depth = (f"с {time.strftime('%d.%m %H:%M', time.localtime(oldest))} "
+                     f"по {time.strftime('%d.%m %H:%M', time.localtime(newest))}")
+        else:
+            depth = "пусто"
+        per_day = 86400 // max(1, timelapse.interval())
+        mb_day = (size / max(1, frames)) * per_day if frames else 0
+        await chat.send_message(
+            f"📊 <b>Архив таймлапса</b>\n"
+            f"Кадров: {frames} · {size} МБ из {timelapse.limit_mb()} МБ\n"
+            f"Охват: {depth}\n"
+            f"Расход: ~{mb_day:.0f} МБ в сутки при интервале {timelapse.interval()} сек\n"
+            f"<i>Когда упрёмся в лимит, самые старые кадры начнут стираться сами.</i>",
+            parse_mode=ParseMode.HTML)
         return
 
     await q.answer()
@@ -660,6 +983,90 @@ async def tv_net_cb(q, ctx, what: str) -> None:
         await q.answer(f"Не вышло: {type(e).__name__}", show_alert=True)
 
 
+def _presence_bars(hours: int) -> tuple[list[str], list[list[tuple[float, float]]], float, float]:
+    """Turn the event log into (names, [(start, width) …] per device, t0, t1).
+
+    Widths are in hours, measured from t0, which is what broken_barh wants.
+    """
+    now = time.time()
+    t0 = now - hours * 3600
+    state = store.presence_state_at(int(t0))
+    events = store.presence_since(int(t0))
+    labels = {d["mac"]: (d["label"] or d["mac"]) for d in store.device_list()}
+
+    macs = list(dict.fromkeys(list(state) + [e["mac"] for e in events]))
+    spans: dict[str, list[tuple[float, float]]] = {m: [] for m in macs}
+    open_since = {m: (t0 if state.get(m) else None) for m in macs}
+
+    for e in events:
+        mac, ts = e["mac"], float(e["ts"])
+        if e["online"]:
+            if open_since.get(mac) is None:
+                open_since[mac] = ts
+        elif open_since.get(mac) is not None:
+            spans.setdefault(mac, []).append(((open_since[mac] - t0) / 3600,
+                                              (ts - open_since[mac]) / 3600))
+            open_since[mac] = None
+    for mac, started in open_since.items():
+        if started is not None:
+            spans.setdefault(mac, []).append(((started - t0) / 3600, (now - started) / 3600))
+
+    # busiest devices first, and never more rows than fit on a phone screen
+    ranked = sorted(spans.items(), key=lambda kv: sum(w for _, w in kv[1]), reverse=True)[:12]
+    ranked.reverse()  # matplotlib draws the first row at the bottom
+    names = [labels.get(m, m) for m, _ in ranked]
+    return names, [s for _, s in ranked], t0, now
+
+
+def _draw_presence(hours: int, path: str) -> bool:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    names, spans, t0, now = _presence_bars(hours)
+    if not names:
+        return False
+    fig, ax = plt.subplots(figsize=(9, 0.5 * len(names) + 1.6), dpi=110)
+    for i, bars in enumerate(spans):
+        ax.broken_barh(bars, (i - 0.35, 0.7), facecolors="#3aa675")
+    ax.set_yticks(range(len(names)))
+    ax.set_yticklabels(names, fontsize=9)
+    ax.set_xlim(0, hours)
+    ticks = list(range(0, hours + 1, max(1, hours // 8)))
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(
+        [time.strftime("%H:%M", time.localtime(t0 + t * 3600)) for t in ticks], fontsize=8)
+    ax.grid(axis="x", alpha=0.25, linestyle=":")
+    ax.set_title(f"Кто дома — последние {hours} ч", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return True
+
+
+async def presence_chart(chat, hours: int = 24) -> None:
+    path = os.path.join(actions.TMP, f"presence_{int(time.time())}.png")
+    try:
+        ok = await asyncio.to_thread(_draw_presence, hours, path)
+    except Exception as e:
+        log.warning("график присутствия: %s", e)
+        await chat.send_message(f"График не нарисовался: {type(e).__name__}")
+        return
+    if not ok:
+        await chat.send_message(
+            "Истории присутствия пока нет — она копится с этого момента, "
+            "по мере того как устройства приходят и уходят.")
+        return
+    with open(path, "rb") as fh:
+        await chat.send_photo(fh, caption=f"📈 Кто дома, последние {hours} ч",
+                              reply_markup=ikb([[("24 ч", "chart:24"), ("3 дня", "chart:72"),
+                                                 ("неделя", "chart:168")]]))
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 async def home_report(chat, what: str) -> None:
     if what == "devices":
         found = await netscan.sweep()
@@ -763,19 +1170,55 @@ async def home_report(chat, what: str) -> None:
                 parse_mode=ParseMode.HTML)
 
     elif what == "status":
-        b = await actions.battery()
-        wifi = await actions.wifi_info()
-        net_up = await netscan.internet_up()
-        online = len(store.device_list(online_only=True))
+        # One screen instead of four buttons: thermometer, battery, light and
+        # the network line all come from here now.
+        b, wifi, lux, net_up = await asyncio.gather(
+            actions.battery(), actions.wifi_info(),
+            actions.light_level(), netscan.internet_up(),
+        )
+        plugged = b.get("plugged", "") != "UNPLUGGED"
+        pct = b.get("percentage", "?")
+        power = "от сети" if plugged else "от батареи"
+
+        if lux is None:
+            light_line = "💡 датчик освещённости не ответил"
+        else:
+            mood = "темно" if lux < 10 else ("сумрак" if lux < 80 else "светло")
+            light_line = f"💡 {lux:.0f} лк — {mood}"
+
+        ssid = wifi.get("ssid") or ""
+        # Android hands out "<unknown ssid>" when the location permission is
+        # missing, and an empty string when wifi is off. Neither is a network
+        # name, so don't print either of them as if it were one.
+        if ssid in ("", "<unknown ssid>", "0x", "null"):
+            wifi_line = "📶 Wi-Fi: <b>Отключено</b>"
+        else:
+            wifi_line = (f"📶 Wi-Fi: <b>Подключено</b> · {html.escape(ssid)}\n"
+                         f"   {wifi.get('link_speed_mbps','?')} Мбит/с · "
+                         f"{wifi.get('rssi','?')} дБм · "
+                         f"{'5' if (wifi.get('frequency_mhz') or 0) > 3000 else '2.4'} ГГц")
+
+        span = timelapse.bounds()
+        tl_line = ("📹 таймлапс пишет, кадр раз в "
+                   f"{timelapse.interval()} сек" if timelapse.enabled()
+                   else "📹 таймлапс остановлен")
+        if span:
+            tl_line += f" · глубина {_ago(time.time() - span[0])}"
+
         await chat.send_message(
-            f"📊 <b>Статус дома</b>\n"
-            f"🔋 {b.get('percentage','?')}% · {b.get('plugged','?')}\n"
+            f"📊 <b>Статус</b>\n"
             f"🌡 {b.get('temperature','?')} °C\n"
-            f"📶 {wifi.get('ssid','?')} · {wifi.get('link_speed_mbps','?')} Мбит/с\n"
-            f"🌐 интернет: {'есть' if net_up else 'НЕТ'}\n"
-            f"👥 устройств в сети: {online}",
+            f"🔋 {pct}% · {power} · {b.get('health','?')}\n"
+            f"{light_line}\n"
+            f"{wifi_line}\n"
+            f"🌐 Интернет: <b>{'Подключено' if net_up else 'Отключено'}</b>\n"
+            f"👥 Устройств в сети: {len(store.device_list(online_only=True))}\n"
+            f"{tl_line}",
             parse_mode=ParseMode.HTML,
         )
+
+    elif what == "chart":
+        await presence_chart(chat)
 
 
 # ---------------------------------------------------------------- wiring

@@ -152,17 +152,32 @@ class TV:
         )
         return self.pointer
 
-    async def button(self, name: str) -> None:
-        """Arrow keys, OK, BACK, HOME… go over a separate little socket."""
+    async def _pointer_send(self, message: str) -> None:
         for attempt in (1, 2):
             try:
                 sock = await self._pointer_socket()
-                await sock.send(f"type:button\nname:{name.upper()}\n\n")
+                await sock.send(message)
                 return
             except Exception:
                 self.pointer = None
                 if attempt == 2:
                     raise
+
+    async def button(self, name: str) -> None:
+        """Arrow keys, OK, BACK, HOME… go over a separate little socket."""
+        await self._pointer_send(f"type:button\nname:{name.upper()}\n\n")
+
+    # The same socket carries the Magic Remote's pointer. webOS has no absolute
+    # cursor API — you can only shove it by a delta, exactly like a trackpad —
+    # so the browser gets arrow buttons that push the cursor a step at a time.
+    async def move(self, dx: int, dy: int) -> None:
+        await self._pointer_send(f"type:move\ndx:{int(dx)}\ndy:{int(dy)}\ndown:0\n\n")
+
+    async def click(self) -> None:
+        await self._pointer_send("type:click\n\n")
+
+    async def scroll(self, dy: int) -> None:
+        await self._pointer_send(f"type:scroll\ndx:0\ndy:{int(dy)}\n\n")
 
     # ---------- the actual remote ----------
 
@@ -334,3 +349,16 @@ async def youtube_stop() -> bool:
     """Kill the app properly — this is what actually clears a stuck loader."""
     status, _ = await _dial("DELETE", "YouTube/run")
     return status in (200, 201, 204)
+
+
+BROWSER_ID = "com.webos.app.browser"
+
+
+async def wait_awake(seconds: int = 45, step: float = 3.0) -> bool:
+    """Poll the control port until the set answers. ~40 s after an IR power-on."""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < deadline:
+        if await reachable():
+            return True
+        await asyncio.sleep(step)
+    return False
