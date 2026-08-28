@@ -331,7 +331,7 @@ def _build_gif(frames: list[tuple[float, str]], out: str, px: int, ms: int) -> b
             im.draft("RGB", (px, px))
             im = im.convert("RGB")
             im.thumbnail((px, px), Image.LANCZOS)
-            imgs.append(im.convert("P", palette=Image.ADAPTIVE, colors=128))
+            imgs.append(im.convert("P", palette=Image.ADAPTIVE, colors=64))
         except Exception:
             continue
     if not imgs:
@@ -341,7 +341,7 @@ def _build_gif(frames: list[tuple[float, str]], out: str, px: int, ms: int) -> b
     return os.path.getsize(out) > 0
 
 
-async def clip(seconds: int, px: int = 640, fps: int = 6) -> tuple[str | None, int, int]:
+async def clip(seconds: int, px: int | None = None, fps: int = 6) -> tuple[str | None, int, int]:
     """A GIF of the last `seconds` of the archive.
 
     Returns (path, frames used, frames available). The two counts differ when
@@ -355,6 +355,10 @@ async def clip(seconds: int, px: int = 640, fps: int = 6) -> tuple[str | None, i
     if available > GIF_MAX_FRAMES:
         step = available / GIF_MAX_FRAMES
         frames = [frames[int(i * step)] for i in range(GIF_MAX_FRAMES)]
+    if px is None:
+        # GIF has no interframe compression worth the name, so a long clip has
+        # to trade resolution for size or it won't fit through Telegram.
+        px = 640 if len(frames) <= 20 else (512 if len(frames) <= 40 else 400)
     out = os.path.join(actions.TMP, f"clip_{int(now)}.gif")
     ok = await asyncio.to_thread(_build_gif, frames, out, px, max(40, 1000 // fps))
     return (out if ok else None), len(frames), available

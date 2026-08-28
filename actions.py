@@ -41,6 +41,28 @@ async def run_json(cmd: list[str], timeout: int = 30):
         return None
 
 
+def json_stream(text: str) -> list:
+    """Parse back-to-back JSON objects out of one blob of output.
+
+    termux-sensor with -n 3 prints three separate objects one after another,
+    which is not valid JSON as a whole — json.loads choked on it and the bot
+    reported "the sensor is busy" for something that had answered perfectly.
+    """
+    decoder = json.JSONDecoder()
+    out, idx = [], 0
+    while idx < len(text):
+        while idx < len(text) and text[idx] in " \t\r\n":
+            idx += 1
+        if idx >= len(text):
+            break
+        try:
+            obj, idx = decoder.raw_decode(text, idx)
+        except ValueError:
+            break
+        out.append(obj)
+    return out
+
+
 # ---------- camera ----------
 
 # Android hands the camera to one caller at a time. Now that the timelapse
@@ -158,11 +180,14 @@ async def light_level() -> float | None:
     first, and give it a couple of tries before giving up.
     """
     for attempt in (1, 2, 3):
-        data = await run_json(["termux-sensor", "-s", LIGHT_SENSOR, "-n", "3"], timeout=30)
-        if data:
-            for key, vals in data.items():
+        _, out, _ = await run(["termux-sensor", "-s", LIGHT_SENSOR, "-n", "3"], timeout=30)
+        samples = []
+        for chunk in json_stream(out):
+            for vals in chunk.values() if isinstance(chunk, dict) else ():
                 if isinstance(vals, dict) and vals.get("values"):
-                    return float(vals["values"][0])
+                    samples.append(float(vals["values"][0]))
+        if samples:
+            return sum(samples) / len(samples)   # the sensor jitters, so average
         if attempt < 3:
             await run(["termux-sensor", "-c"], timeout=15)
             await asyncio.sleep(1.0)
@@ -171,13 +196,12 @@ async def light_level() -> float | None:
 
 async def motion_sample() -> float | None:
     """Magnitude of linear acceleration — near 0 when the phone sits still."""
-    data = await run_json(["termux-sensor", "-s", "Linear Acceleration", "-n", "1"], timeout=25)
-    if not data:
-        return None
-    for key, vals in data.items():
-        if isinstance(vals, dict) and "values" in vals and len(vals["values"]) >= 3:
-            x, y, z = vals["values"][:3]
-            return (x * x + y * y + z * z) ** 0.5
+    _, out, _ = await run(["termux-sensor", "-s", "Linear Acceleration", "-n", "1"], timeout=25)
+    for chunk in json_stream(out):
+        for vals in chunk.values() if isinstance(chunk, dict) else ():
+            if isinstance(vals, dict) and len(vals.get("values") or ()) >= 3:
+                x, y, z = vals["values"][:3]
+                return (x * x + y * y + z * z) ** 0.5
     return None
 
 
