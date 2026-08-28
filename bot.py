@@ -1382,7 +1382,10 @@ async def post_init(app: Application) -> None:
             log.warning("не смог отправить: %s", e)
 
     app.bot_data["watchers"] = watchers.start_all(send)
-    log.info("сторож запущен: %d наблюдателей", len(app.bot_data["watchers"]))
+    app.bot_data["timelapse"] = asyncio.create_task(timelapse.recorder(send))
+    store.presence_trim()
+    log.info("сторож запущен: %d наблюдателей, таймлапс раз в %d с",
+             len(app.bot_data["watchers"]), timelapse.interval())
 
 
 def main() -> None:

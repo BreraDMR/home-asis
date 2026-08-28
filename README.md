@@ -18,14 +18,34 @@ installed from the F-Droid/GitHub builds.
 
 | Button | What happens |
 | --- | --- |
-| 📷 Camera | Photo from the back camera, the front one, or both |
-| 🎤 Listen | Record 10 or 30 seconds of room audio and send it back as a voice message |
-| 📝 Speech to text | Listen and reply with a transcript instead of audio |
-| 🗣 Speak | Type text, the phone says it out loud in the room |
-| 🔦 Torch | Blink, hold the light on, vibrate |
-| 🚨 Find phone | Torch + full-volume speech + vibration at once |
-| 📺 TV | Two separate remotes for the LG set: over the network, or over infrared |
-| 🏠 Home | Who's on the network, access points in range, thermometer, battery, light level, overall status |
+| 📷 Back / 🤳 Front | A photo, straight away — the cameras are on the main keyboard, not behind a menu |
+| 📹 Timelapse | The rolling recording: clips of the last N minutes, a frame from a given time, interval and quality |
+| 📊 Status | Thermometer, battery, light level, wifi and internet on one screen |
+| 👥 Who's home | Devices on the LAN right now |
+| 📺 TV | Three remotes for the LG set: IR power + network for the rest, network only, or IR only |
+| 🏠 Home | Listen, speak, torch, find the phone, and the presence chart |
+| 📶 Networks | Access points in range, device and network logs, naming things |
+
+**The timelapse**
+
+The phone films the room the way a dashcam films the road: one frame every N
+seconds, around the clock, oldest frames deleted once the archive hits its
+size cap. Nothing to start, nothing to stop — you only ever look backwards.
+
+- interval 5 / 10 / 15 / 20 / 30 / 60 s, 20 by default
+- clips of the last 30 s, 1, 2, 3, 10, 30 minutes or an hour, sent as a GIF
+- "what did it look like at 15:10" returns the three nearest frames
+- frames are resized on the way in, so a 5 GB archive holds about two weeks
+  at the default settings
+
+Frames live in `frames/<date>/<hour>/<mmss>.jpg` — the filesystem is the
+index, so a window of time is one or two directory reads and nothing goes
+stale if the process is killed mid-write.
+
+There is no mp4 here, and that's not a shortcut: ffmpeg is installed on this
+phone but refuses to run at all (Termux's 8.1.2 build under Android 7 exits
+silently, not even `-version` prints). Frames are resized and clips are
+assembled with Pillow instead.
 
 **Watchers (the phone messages you on its own)**
 
@@ -56,11 +76,26 @@ is closed to unprivileged apps on Android. Presence is done over Wi-Fi only:
 That last step is what makes it usable. Phones drop off the ARP table when
 they doze; without the grace period you'd get "left home" alerts all night.
 
-## Two TV remotes, on purpose
+The sweep survives a quirk of this phone: ICMP echo replies never come back
+to Termux here — not from the internet, not even from the router — so `ping`
+reports 100% loss for everything. The ARP entries it leaves behind are still
+real, because the kernel has to resolve the address before it can send at
+all, and that is the only part the sweep needs. Anything that judged the
+network by a ping exit code was wrong, which is why the internet check is a
+TCP connect now.
+
+## Three TV remotes, on purpose
 
 The living-room LG (50LF652V, 2015) can be driven two ways, and the bot keeps
-them apart. Pick one in the 📺 section; neither ever silently falls back to the
-other, so a failure tells you which channel is broken.
+the channels apart. Pick a remote in the 📺 section; the network one never
+silently falls back to IR, so a failure tells you which channel is broken.
+
+The default is the **combined** remote, and it exists because of one hard
+fact below: IR is the only thing that can wake this set, and the network is
+better at everything else. So power goes over IR, the rest over the network,
+and the channel-zapping and TV-settings buttons are left out entirely.
+The ▶️ YouTube button on it is a macro — if the set is off it fires IR power,
+waits for the TV to come back on the network, and then launches the app.
 
 **Over the network — `tv.py`.** The set is on the router by cable, so we speak
 SSAP, LG's own WebSocket protocol on port 3000. This is the good one: launching
@@ -102,12 +137,14 @@ and for the pairing dialog above.
 On the phone, inside Termux:
 
 ```sh
-pkg install python termux-api ffmpeg
+pkg install python termux-api python-pillow matplotlib
 pip install python-telegram-bot websockets
 ```
 
-`ffmpeg` is optional — without it, recordings are sent as audio files instead of
-proper voice messages.
+Pillow does the timelapse work and matplotlib draws the presence chart; both
+install as Termux packages, not through pip. `ffmpeg` would turn microphone
+recordings into proper Telegram voice messages, but on this phone it doesn't
+run at all, so they arrive as audio files.
 
 The Termux:API companion app must be installed from the **same source** as
 Termux itself (both from GitHub releases, or both from F-Droid). Mixed signatures
@@ -147,10 +184,11 @@ remotely. Do it once, up front, or the first remote photo will silently fail.
 ```
 bot.py       menus, handlers, the button UI
 actions.py   thin wrappers over the termux-* binaries
+timelapse.py the rolling recorder, the frame archive, and GIF clips
 watchers.py  background loops that message you on events
 netscan.py   ping sweep + ARP + access point scan
 ir.py        NEC encoder and the LG code table (infrared remote)
 tv.py        SSAP client for the same TV over the network
 pair_tv.py   one-off pairing helper, writes the client-key into home.db
-store.py     SQLite: labels, last-seen state, settings
+store.py     SQLite: labels, last-seen state, presence log, settings
 ```
