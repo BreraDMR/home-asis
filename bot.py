@@ -182,7 +182,8 @@ def tv_net_kb() -> InlineKeyboardMarkup:
         [("⬅️", "tvn:btn:LEFT"), ("OK", "tvn:btn:ENTER"), ("➡️", "tvn:btn:RIGHT")],
         [("⬇️", "tvn:btn:DOWN")],
         [("↩️ Назад", "tvn:btn:BACK"), ("🏠 Home", "tvn:btn:HOME"), ("📺 Каналы", "tvn:livetv")],
-        [("📱 Приложения", "tvn:apps"), ("🔌 Источник", "tvn:inputs")],
+        [("▶️ YouTube", "tvn:youtube"), ("📱 Приложения", "tvn:apps")],
+        [("🌐 Браузер", "tvn:browser"), ("🔌 Источник", "tvn:inputs")],
         [("⌨️ Ввести текст", "tvn:type"), ("♻️ Перезапустить YouTube", "tvn:yt_restart")],
         [("💬 Написать на экран", "tvn:toast"), ("ℹ️ Что на экране", "tvn:status")],
         [("📡 Переключиться на ИК-пульт", "tvpick:ir")],
@@ -231,10 +232,50 @@ async def section_tv(update: Update, ctx) -> None:
         "📺 <b>LG 50LF652V</b>\nЧем управлять?",
         parse_mode=ParseMode.HTML,
         reply_markup=ikb([
-            [("🌐 По сети (кабель)", "tvpick:net")],
-            [("📡 По инфракрасному", "tvpick:ir")],
+            [("🎛 Обычный (ИК питание + сеть)", "tvpick:mix")],
+            [("🌐 Только по сети", "tvpick:net")],
+            [("📡 Только по инфракрасному", "tvpick:ir")],
         ]),
     )
+
+
+# The third remote: питание уходит по ИК (сеть его разбудить не может — в
+# дежурном режиме телевизор глушит порт), всё остальное — по сети. Каналов
+# и настроек ТВ здесь нет: с них Дамир всё равно не пользуется, а лишние
+# кнопки только мешают попасть в нужную.
+def tv_mix_kb() -> InlineKeyboardMarkup:
+    return ikb([
+        [("⏻ Включить (ИК)", "tvc:on"), ("⏻ Выключить (ИК)", "tvc:off")],
+        [("🔉 Тише", "tvn:vol_down"), ("🔇 Звук", "tvn:mute"), ("🔊 Громче", "tvn:vol_up")],
+        [("⬆️", "tvn:btn:UP")],
+        [("⬅️", "tvn:btn:LEFT"), ("OK", "tvn:btn:ENTER"), ("➡️", "tvn:btn:RIGHT")],
+        [("⬇️", "tvn:btn:DOWN")],
+        [("↩️ Назад", "tvn:btn:BACK"), ("🏠 Home", "tvn:btn:HOME")],
+        [("▶️ YouTube", "tvn:youtube"), ("📱 Приложения", "tvn:apps")],
+        [("🌐 Браузер", "tvn:browser"), ("ℹ️ Что на экране", "tvn:status")],
+    ])
+
+
+def tv_pointer_kb(step: int) -> InlineKeyboardMarkup:
+    """A trackpad made of buttons — webOS only moves its cursor by deltas."""
+    return ikb([
+        [("↖️", f"tvp:m:-{step}:-{step}"), ("⬆️", f"tvp:m:0:-{step}"),
+         ("↗️", f"tvp:m:{step}:-{step}")],
+        [("⬅️", f"tvp:m:-{step}:0"), ("👆 Клик", "tvp:click"),
+         ("➡️", f"tvp:m:{step}:0")],
+        [("↙️", f"tvp:m:-{step}:{step}"), ("⬇️", f"tvp:m:0:{step}"),
+         ("↘️", f"tvp:m:{step}:{step}")],
+        [("🔼 Прокрутка вверх", "tvp:s:1"), ("🔽 Прокрутка вниз", "tvp:s:-1")],
+        [(f"📏 Шаг курсора: {step} px", "tvp:step"), ("⌨️ Ввести текст", "tvn:type")],
+        [("↩️ К пульту", "tvpick:mix")],
+    ])
+
+
+def pointer_step() -> int:
+    try:
+        return int(store.get("tv_pointer_step", "60") or 60)
+    except ValueError:
+        return 60
 
 
 async def section_home(update: Update, ctx) -> None:
@@ -488,11 +529,14 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     vid = tv.video_id(text)
     if vid:
         await update.message.chat.send_action(ChatAction.TYPING)
+        # a link on a sleeping TV used to just fail; now it turns the set on first
+        if not await tv_wake_if_asleep(update.message.chat):
+            return
         if await tv.youtube_play(vid):
             await update.message.reply_text("▶️ Включаю на телевизоре.")
         else:
             await update.message.reply_text(
-                "Телевизор не принял ссылку — он вообще включён?")
+                "Телевизор на связи, но ссылку не принял — попробуй ещё раз.")
         return
 
     await update.message.reply_text("Не понял. Пользуйся кнопками снизу.", reply_markup=MAIN_KB)
@@ -570,7 +614,13 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     if data.startswith("tvpick:"):
         await q.answer()
-        if data.endswith(":net"):
+        if data.endswith(":mix"):
+            await chat.send_message(
+                "🎛 <b>Телевизор</b>\nLG 50LF652V · 192.168.1.100\n"
+                "<i>Питание идёт по ИК, всё остальное — по сети. Ссылку на YouTube "
+                "можно просто прислать в чат, включится сразу на видео.</i>",
+                parse_mode=ParseMode.HTML, reply_markup=tv_mix_kb())
+        elif data.endswith(":net"):
             await tv_net_message(chat)
         else:
             await chat.send_message(
@@ -581,6 +631,29 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     if data.startswith("tvn:"):
         await tv_net_cb(q, ctx, data.split(":", 1)[1])
+        return
+
+    if data.startswith("tvc:"):
+        # power, and only power, on the combined remote
+        what = data.split(":", 1)[1]
+        ok, msg = await ir.send("power")
+        if not ok:
+            await q.answer(f"ИК не сработал: {msg}"[:190], show_alert=True)
+            return
+        if what == "on":
+            await q.answer("⏻ Включаю по ИК…")
+            if await tv.wait_awake(45):
+                await chat.send_message("📺 Телевизор проснулся, сеть на связи.")
+            else:
+                await chat.send_message(
+                    "📺 Экран должен был включиться, но по сети телевизор пока молчит — "
+                    "дай ему полминуты.")
+        else:
+            await q.answer("⏻ Выключаю по ИК")
+        return
+
+    if data.startswith("tvp:"):
+        await tv_pointer_cb(q, ctx, data.split(":", 1)[1])
         return
 
     if data.startswith("tv:"):
@@ -855,6 +928,54 @@ async def timelapse_cb(q, ctx, what: str) -> None:
     await q.answer()
 
 
+async def tv_pointer_cb(q, ctx, what: str) -> None:
+    """The browser trackpad. Every press nudges the Magic Remote cursor."""
+    t = tv_net()
+    if t is None:
+        await q.answer("Телевизор не спарен по сети", show_alert=True)
+        return
+    if what == "step":
+        steps = [20, 60, 120, 250]
+        cur = pointer_step()
+        store.put("tv_pointer_step", steps[(steps.index(cur) + 1) % len(steps)]
+                  if cur in steps else 60)
+        await q.answer(f"Шаг {pointer_step()} px")
+        await q.edit_message_reply_markup(reply_markup=tv_pointer_kb(pointer_step()))
+        return
+    try:
+        if what.startswith("m:"):
+            _, dx, dy = what.split(":")
+            await t.move(int(dx), int(dy))
+            await q.answer(f"{dx}, {dy}")
+        elif what == "click":
+            await t.click()
+            await q.answer("👆")
+        elif what.startswith("s:"):
+            await t.scroll(int(what.split(":", 1)[1]))
+            await q.answer("прокрутил")
+    except Exception as e:
+        await q.answer(f"Курсор не поехал: {type(e).__name__}", show_alert=True)
+
+
+async def tv_wake_if_asleep(chat) -> bool:
+    """IR power-on, but only if the set isn't already up. Returns True if it's awake."""
+    if await tv.reachable():
+        return True
+    ok, msg = await ir.send("power")
+    if not ok:
+        await chat.send_message(f"Телевизор спит, а ИК не сработал: {msg}")
+        return False
+    note = await chat.send_message("⏻ Телевизор был выключен — включаю и жду сеть…")
+    awake = await tv.wait_awake(50)
+    try:
+        await note.delete()
+    except Exception:
+        pass
+    if not awake:
+        await chat.send_message("📺 Экран включился, но по сети телевизор ещё не отвечает.")
+    return awake
+
+
 async def tv_net_cb(q, ctx, what: str) -> None:
     """Everything the wired remote can do. One place, one error style."""
     chat = q.message.chat
@@ -934,6 +1055,30 @@ async def tv_net_cb(q, ctx, what: str) -> None:
         elif what.startswith("in:"):
             await t.switch_input(what.split(":", 1)[1])
             await q.answer("🔌 Переключил")
+
+        elif what == "youtube":
+            # The one-tap macro: wake the set if it's off, then go straight
+            # into the app. Before, that was power, wait, apps, scroll, OK.
+            await q.answer("Открываю YouTube…")
+            if not await tv_wake_if_asleep(chat):
+                return
+            await t.launch(tv.YOUTUBE_ID)
+            await chat.send_message(
+                "▶️ YouTube запущен.\n<i>Повиснет на загрузке — пришли ссылку "
+                "на видео сюда, оно откроется мимо меню.</i>",
+                parse_mode=ParseMode.HTML)
+
+        elif what == "browser":
+            await q.answer("Открываю браузер…")
+            if not await tv_wake_if_asleep(chat):
+                return
+            await t.launch(tv.BROWSER_ID)
+            await chat.send_message(
+                "🌐 <b>Браузер</b> — управление курсором\n"
+                "<i>У webOS нет «поставить курсор сюда»: он двигается только "
+                "рывками, как по тачпаду. Шаг переключается кнопкой снизу — "
+                "крупным добираешься до места, мелким целишься.</i>",
+                parse_mode=ParseMode.HTML, reply_markup=tv_pointer_kb(pointer_step()))
 
         elif what == "yt_restart":
             await q.answer("Перезапускаю…")
