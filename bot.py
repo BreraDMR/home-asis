@@ -346,6 +346,8 @@ def timelapse_kb() -> InlineKeyboardMarkup:
         [("30 сек", "tl:clip:30"), ("1 мин", "tl:clip:60"),
          ("2 мин", "tl:clip:120"), ("3 мин", "tl:clip:180")],
         [("10 мин", "tl:clip:600"), ("30 мин", "tl:clip:1800"), ("1 час", "tl:clip:3600")],
+        [("3 часа", "tl:clip:10800"), ("6 часов", "tl:clip:21600"),
+         ("12 часов", "tl:clip:43200"), ("сутки", "tl:clip:86400")],
         [("🕐 Кадр по времени", "tl:attime"), ("🖼 Последний кадр", "tl:last")],
         [(f"⏱ Интервал: {timelapse.interval()} сек", "tl:interval")],
         [("⚙️ Настройки записи", "tl:setup"), ("📊 Архив", "tl:stats")],
@@ -361,8 +363,10 @@ def timelapse_text() -> str:
     else:
         depth = "архив пока пуст"
     state = "🔴 пишет" if timelapse.enabled() else "⏸ остановлен"
+    mode = ("кадр раз в {} сек, только когда что-то движется"
+            if timelapse.motion_only() else "кадр раз в {} сек").format(timelapse.interval())
     return (f"📹 <b>Таймлапс</b> — {state}\n"
-            f"Кадр раз в {timelapse.interval()} сек · {depth}\n"
+            f"{mode.capitalize()} · {depth}\n"
             f"<i>Старое стирается само, когда архив дорастает до "
             f"{timelapse.limit_mb() // 1024} ГБ.</i>")
 
@@ -376,13 +380,20 @@ def tl_setup_kb() -> InlineKeyboardMarkup:
     cam = "задняя" if timelapse.camera() == "0" else "фронтальная"
     px = timelapse.width()
     quality = {640: "экономно", 960: "средне", 1280: "детально", 1600: "максимум"}
-    return ikb([
+    sens = {"low": "чуткая", "mid": "обычная", "high": "грубая"}
+    rows = [
         [(f"📷 Камера: {cam}", "tl:set:cam")],
         [(f"🖼 Качество: {quality.get(px, px)} ({px}px)", "tl:set:px")],
         [(f"🔄 Поворот кадра: {timelapse.rotate()}°", "tl:set:rot")],
         [(f"💾 Лимит архива: {timelapse.limit_mb() // 1024} ГБ", "tl:set:limit")],
-        [("↩️ Назад", "tl:menu")],
-    ])
+        [("🎯 Пишу: только движение" if timelapse.motion_only() else "🎞 Пишу: всё подряд",
+          "tl:set:motion")],
+    ]
+    if timelapse.motion_only():
+        rows.append([(f"📶 Чувствительность: {sens[timelapse.motion_level()]}",
+                      "tl:set:sens")])
+    rows.append([("↩️ Назад", "tl:menu")])
+    return ikb(rows)
 
 
 def settings_kb() -> InlineKeyboardMarkup:
@@ -816,10 +827,16 @@ async def timelapse_cb(q, ctx, what: str) -> None:
 
     if what.startswith("clip:"):
         seconds = int(what.split(":", 1)[1])
+        window = _ago(seconds) if seconds >= 60 else f"{seconds} сек"
         await q.answer("Собираю…")
-        note = await chat.send_message("⏳ Склеиваю кадры…")
+        # a day is a couple of minutes of encoding — say so instead of looking dead
+        note = await chat.send_message(
+            f"⏳ Собираю видео за {window}…"
+            + ("\n<i>Долгий промежуток — это займёт минуту-две.</i>"
+               if seconds >= 10800 else ""),
+            parse_mode=ParseMode.HTML)
         try:
-            path, used, available = await timelapse.clip(seconds)
+            path, used, available, playback = await timelapse.clip(seconds)
             if not path:
                 await note.edit_text(
                     "За этот промежуток кадров нет. Запись включена? "
@@ -827,11 +844,13 @@ async def timelapse_cb(q, ctx, what: str) -> None:
                     "за 30 секунд в него попадает всего пара кадров.")
                 return
             thinned = (f" из {available}" if available > used else "")
+            size_mb = os.path.getsize(path) / 1048576
             await chat.send_action(ChatAction.UPLOAD_VIDEO)
             with open(path, "rb") as fh:
-                await chat.send_animation(
-                    fh, caption=f"📹 последние {_ago(seconds) if seconds >= 60 else f'{seconds} сек'} "
-                                f"· {used} кадров{thinned}")
+                await chat.send_video(
+                    fh, supports_streaming=True,
+                    caption=f"📹 последние {window} · {used} кадров{thinned} "
+                            f"· {playback} сек просмотра · {size_mb:.1f} МБ")
             os.remove(path)
             await note.delete()
         except Exception as e:
@@ -899,6 +918,12 @@ async def timelapse_cb(q, ctx, what: str) -> None:
             steps = [1024, 2048, 5120, 7168]
             store.put("tl_limit_mb", steps[(steps.index(timelapse.limit_mb()) + 1) % len(steps)]
                       if timelapse.limit_mb() in steps else 5120)
+        elif key == "motion":
+            store.set_flag("tl_motion_only", not timelapse.motion_only())
+        elif key == "sens":
+            steps = ["low", "mid", "high"]
+            store.put("tl_motion_level",
+                      steps[(steps.index(timelapse.motion_level()) + 1) % len(steps)])
         await q.answer("Поменял")
         await q.edit_message_reply_markup(reply_markup=tl_setup_kb())
         return

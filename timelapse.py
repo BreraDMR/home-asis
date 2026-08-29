@@ -24,6 +24,7 @@ import datetime as dt
 import logging
 import os
 import shutil
+import tempfile
 import time
 
 from PIL import Image
@@ -53,6 +54,22 @@ MIN_FREE_MB = 800
 # A GIF with hundreds of frames is unusable and slow to build, so long windows
 # get thinned out to this many frames.
 GIF_MAX_FRAMES = 60
+
+# Ceiling for a video clip. A day at 20 s is 4300 frames; at 900 the day still
+# plays for a minute at 15 fps and encodes in about half the time.
+MAX_CLIP_FRAMES = 900
+
+# Motion mode: how different two frames have to be before we call it movement.
+# Compared on a 64-px greyscale thumbnail, so this is "average brightness
+# change per pixel, 0-255" — a person walking through moves it well past 6,
+# while sensor noise in a dark room sits under 2.
+MOTION_LEVELS = {"low": 3.0, "mid": 6.0, "high": 12.0}
+DEFAULT_MOTION = "mid"
+
+# Even with nothing moving, keep one frame every so often. Otherwise a quiet
+# night leaves a hole in the archive and you can't tell "nothing happened"
+# from "the camera died".
+KEEPALIVE_SECONDS = 600
 
 
 # ---------------------------------------------------------------- settings
@@ -92,6 +109,16 @@ def rotate() -> int:
 
 def enabled() -> bool:
     return store.flag("tl_on", True)
+
+
+def motion_only() -> bool:
+    """Keep every frame, or only the ones where something changed."""
+    return store.flag("tl_motion_only", False)
+
+
+def motion_level() -> str:
+    v = store.get("tl_motion_level", DEFAULT_MOTION)
+    return v if v in MOTION_LEVELS else DEFAULT_MOTION
 
 
 # ---------------------------------------------------------------- paths
@@ -224,12 +251,78 @@ def _shrink(src: str, dst: str) -> int:
         return 0
 
 
+# The last frame we looked at, as a tiny greyscale thumbnail. Kept in memory
+# only — after a restart the first frame is always saved, which is fine.
+_last_thumb: Image.Image | None = None
+_last_kept: float = 0.0
+
+
+def _thumb(path: str) -> Image.Image | None:
+    """A 64-px grey thumbnail — small enough that sensor noise averages out."""
+    try:
+        im = Image.open(path)
+        im.draft("L", (64, 64))
+        im = im.convert("L")
+        im.thumbnail((64, 64), Image.BILINEAR)
+        return im
+    except Exception:
+        return None
+
+
+def _difference(a: Image.Image, b: Image.Image) -> float:
+    """Mean absolute brightness change per pixel between two thumbnails."""
+    if a.size != b.size:
+        return 999.0
+    pa, pb = a.tobytes(), b.tobytes()
+    if len(pa) != len(pb) or not pa:
+        return 999.0
+    return sum(abs(x - y) for x, y in zip(pa, pb)) / len(pa)
+
+
+def _worth_keeping(raw: str) -> tuple[bool, float]:
+    """Motion mode: is this frame different enough from the previous one?"""
+    global _last_thumb, _last_kept
+    thumb = _thumb(raw)
+    if thumb is None:
+        return True, 0.0            # can't tell — keep it rather than lose it
+    previous, _last_thumb = _last_thumb, thumb
+    if previous is None:
+        return True, 0.0
+    diff = _difference(previous, thumb)
+    if diff >= MOTION_LEVELS[motion_level()]:
+        return True, diff
+    # nothing moved, but don't leave a hole in the timeline either
+    if time.time() - _last_kept >= KEEPALIVE_SECONDS:
+        return True, diff
+    return False, diff
+
+
+# capture_one's answer when the camera worked fine and we chose not to keep
+# the frame — that must not look like a camera failure to the recorder loop.
+SKIPPED = "skipped"
+
+
 async def capture_one() -> str | None:
-    """Take one frame into the archive. Returns its path, or None."""
-    global _size_bytes
+    """Take one frame into the archive. Returns its path, SKIPPED, or None.
+
+    In motion mode the camera still fires on every tick — there's no other way
+    to see whether anything moved — but the frame is only written to disk when
+    it differs from the one before. That doesn't save battery; it saves the
+    archive from being 90% empty room, which is what makes a whole day
+    watchable in a few seconds.
+    """
+    global _size_bytes, _last_kept
     raw = await actions.photo(camera())
     if not raw:
         return None
+    if motion_only():
+        keep, _ = await asyncio.to_thread(_worth_keeping, raw)
+        if not keep:
+            try:
+                os.remove(raw)
+            except OSError:
+                pass
+            return SKIPPED
     ts = time.time()
     dst = _path_for(ts)
     written = await asyncio.to_thread(_shrink, raw, dst)
@@ -239,6 +332,7 @@ async def capture_one() -> str | None:
         pass
     if not written:
         return None
+    _last_kept = ts
     archive_size_mb()   # make sure the running total is initialised
     _size_bytes += written
     return dst
@@ -254,7 +348,9 @@ async def recorder(send=None) -> None:
         started = time.time()
         try:
             path = await capture_one()
-            if path:
+            if path == SKIPPED:
+                fails = 0       # camera is fine, the room just sat still
+            elif path:
                 fails = 0
                 if _trim():
                     log.info("кольцо: подчистил старые кадры, архив %d МБ", archive_size_mb())
@@ -341,24 +437,62 @@ def _build_gif(frames: list[tuple[float, str]], out: str, px: int, ms: int) -> b
     return os.path.getsize(out) > 0
 
 
-async def clip(seconds: int, px: int | None = None, fps: int = 6) -> tuple[str | None, int, int]:
-    """A GIF of the last `seconds` of the archive.
+async def _build_mp4(frames: list[tuple[float, str]], out: str, px: int, fps: int) -> bool:
+    """Hand the frames to ffmpeg as a numbered sequence of symlinks.
 
-    Returns (path, frames used, frames available). The two counts differ when
-    the window held more frames than a sane GIF can carry.
+    ffmpeg wants %06d.jpg, the archive is laid out by date — symlinks bridge
+    that for free, no copying of a few hundred megabytes involved.
+    """
+    seq = tempfile.mkdtemp(prefix="seq_", dir=actions.TMP)
+    try:
+        for i, (_, path) in enumerate(frames, 1):
+            try:
+                os.symlink(path, os.path.join(seq, f"{i:06d}.jpg"))
+            except OSError:
+                pass
+        code, _, err = await actions.run([
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-framerate", str(fps), "-i", os.path.join(seq, "%06d.jpg"),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "32",
+            "-pix_fmt", "yuv420p",
+            # a dark room is mostly sensor noise, and noise is what makes an
+            # otherwise tiny timelapse balloon — denoise before encoding
+            "-vf", f"scale={px}:-2,hqdn3d=4:3:6:4",
+            "-movflags", "+faststart", out,
+        ], timeout=900)
+        if code != 0:
+            log.warning("ffmpeg: %s", (err or "")[:200])
+        return os.path.exists(out) and os.path.getsize(out) > 0
+    finally:
+        shutil.rmtree(seq, ignore_errors=True)
+
+
+def _thin(frames: list, limit: int) -> list:
+    if len(frames) <= limit:
+        return frames
+    step = len(frames) / limit
+    return [frames[int(i * step)] for i in range(limit)]
+
+
+async def clip(seconds: int, px: int | None = None) -> tuple[str | None, int, int, int]:
+    """A video of the last `seconds` of the archive.
+
+    Returns (path, frames used, frames available, seconds of playback). A day
+    is thinned down so the clip stays watchable — nobody scrubs through four
+    thousand frames in real time.
     """
     now = time.time()
     frames = frames_between(now - seconds, now)
     available = len(frames)
     if not frames:
-        return None, 0, 0
-    if available > GIF_MAX_FRAMES:
-        step = available / GIF_MAX_FRAMES
-        frames = [frames[int(i * step)] for i in range(GIF_MAX_FRAMES)]
+        return None, 0, 0, 0
+    frames = _thin(frames, MAX_CLIP_FRAMES)
+
+    # aim for something you'd actually sit through: a few seconds for a short
+    # window, at most a minute and a half for a whole day
+    fps = 15 if len(frames) > 60 else max(2, min(8, len(frames) // 4 or 1))
     if px is None:
-        # GIF has no interframe compression worth the name, so a long clip has
-        # to trade resolution for size or it won't fit through Telegram.
-        px = 640 if len(frames) <= 20 else (512 if len(frames) <= 40 else 400)
-    out = os.path.join(actions.TMP, f"clip_{int(now)}.gif")
-    ok = await asyncio.to_thread(_build_gif, frames, out, px, max(40, 1000 // fps))
-    return (out if ok else None), len(frames), available
+        px = 960 if len(frames) <= 120 else 640
+    out = os.path.join(actions.TMP, f"clip_{int(now)}.mp4")
+    ok = await _build_mp4(frames, out, px, fps)
+    return (out if ok else None), len(frames), available, round(len(frames) / fps)
