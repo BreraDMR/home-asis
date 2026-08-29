@@ -118,6 +118,10 @@ async def shoot(chat, camera_id: str) -> None:
             "Камера не отдала снимок. Обычно это разрешение или занятая камера — "
             "таймлапс снимает раз в несколько секунд, попробуй ещё раз.")
         return
+    # same rotation and same clock in the corner as the archive frames — a
+    # photo shouldn't arrive sideways and undated just because you asked for
+    # it by hand
+    path = await timelapse.prepare(path)
     with open(path, "rb") as fh:
         await chat.send_photo(fh, caption="📷 задняя" if camera_id == "0" else "🤳 фронтальная")
     try:

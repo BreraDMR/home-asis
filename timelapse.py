@@ -328,6 +328,26 @@ def _shrink(src: str, dst: str, ts: float) -> int:
         return 0
 
 
+async def prepare(src: str, ts: float | None = None) -> str:
+    """Run a one-off photo through the same mill as an archive frame.
+
+    Rotation and the timestamp live here, not in the recorder, so a photo you
+    asked for by hand comes out the same way up and with the same clock on it
+    as the ones the timelapse saves by itself. Falls back to the untouched
+    file if anything goes wrong — better a sideways photo than none.
+    """
+    ts = ts or time.time()
+    dst = src.rsplit(".", 1)[0] + "_ready.jpg"
+    written = await asyncio.to_thread(_shrink, src, dst, ts)
+    if not written:
+        return src
+    try:
+        os.remove(src)
+    except OSError:
+        pass
+    return dst
+
+
 def stamp_existing(cam: str | None = "current") -> tuple[int, int]:
     """Burn the time into frames that were saved before stamping existed.
 
