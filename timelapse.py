@@ -30,7 +30,7 @@ import shutil
 import tempfile
 import time
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 import actions
 import store
@@ -247,8 +247,64 @@ def _trim() -> int:
 
 # ---------------------------------------------------------------- capture
 
-def _shrink(src: str, dst: str) -> int:
-    """Resize and re-encode one frame. Returns the size written, 0 on failure.
+# ---------------------------------------------------------------- timestamp
+
+# Termux has no fontconfig, but matplotlib ships DejaVu and it's already here
+# for the presence chart.
+def _font_path() -> str | None:
+    try:
+        import matplotlib
+        p = os.path.join(os.path.dirname(matplotlib.__file__),
+                         "mpl-data", "fonts", "ttf", "DejaVuSans-Bold.ttf")
+        return p if os.path.exists(p) else None
+    except Exception:
+        return None
+
+
+_font_cache: dict[int, ImageFont.FreeTypeFont] = {}
+
+
+def _font(size: int):
+    if size not in _font_cache:
+        path = _font_path()
+        try:
+            _font_cache[size] = (ImageFont.truetype(path, size) if path
+                                 else ImageFont.load_default())
+        except Exception:
+            _font_cache[size] = ImageFont.load_default()
+    return _font_cache[size]
+
+
+def stamped() -> bool:
+    return store.flag("tl_stamp", True)
+
+
+def _stamp(im: Image.Image, ts: float) -> Image.Image:
+    """Burn the date and time into the bottom-right corner.
+
+    Burnt in rather than added as a caption on purpose: once these frames
+    become a video, a caption is gone and only the pixels remain.
+    """
+    text = time.strftime("%d.%m.%Y  %H:%M:%S", time.localtime(ts))
+    w, h = im.size
+    size = max(12, int(h * 0.035))
+    font = _font(size)
+    draw = ImageDraw.Draw(im, "RGBA")
+    try:
+        box = draw.textbbox((0, 0), text, font=font)
+        tw, th = box[2] - box[0], box[3] - box[1]
+    except Exception:
+        tw, th = len(text) * size // 2, size
+    pad = max(4, size // 3)
+    x, y = w - tw - pad * 2, h - th - pad * 2
+    # a dark plate underneath, or midday sunlight on a white wall eats the text
+    draw.rectangle([x - pad, y - pad, w - pad // 2, h - pad // 2], fill=(0, 0, 0, 140))
+    draw.text((x, y - pad // 2), text, font=font, fill=(255, 255, 255, 235))
+    return im
+
+
+def _shrink(src: str, dst: str, ts: float) -> int:
+    """Resize, stamp and re-encode one frame. Returns bytes written, 0 on failure.
 
     draft() lets libjpeg decode straight to a smaller size, which on this
     phone is the difference between ~1.5 s and ~0.5 s per frame.
@@ -262,12 +318,45 @@ def _shrink(src: str, dst: str) -> int:
         deg = rotate()
         if deg:
             im = im.rotate(-deg, expand=True)  # clockwise, like the phone lies
+        if stamped():
+            im = _stamp(im, ts)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         im.save(dst, "JPEG", quality=quality(), optimize=True)
         return os.path.getsize(dst)
     except Exception as e:
         log.warning("кадр не обработался: %s", e)
         return 0
+
+
+def stamp_existing(cam: str | None = "current") -> tuple[int, int]:
+    """Burn the time into frames that were saved before stamping existed.
+
+    Works off the timestamp in the filename, so it's exact — no guessing from
+    file mtimes, which a copy or an rsync would have destroyed. Re-encoding
+    costs a little quality, so each frame is only ever done once: the marker
+    file next to the archive remembers where we got to.
+    """
+    if cam == "current":
+        cam = camera()
+    done_key = f"tl_stamped_upto_{cam or 'all'}"
+    already = float(store.get(done_key, "0") or 0)
+    stamped_now, failed = 0, 0
+    newest = already
+    for hour_dir in _hour_dirs():
+        for ts, path in _frames_in(hour_dir, cam):
+            if ts <= already:
+                continue
+            try:
+                im = Image.open(path).convert("RGB")
+                im = _stamp(im, ts)
+                im.save(path, "JPEG", quality=quality(), optimize=True)
+                stamped_now += 1
+                newest = max(newest, ts)
+            except Exception:
+                failed += 1
+    if newest > already:
+        store.put(done_key, f"{newest:.0f}")
+    return stamped_now, failed
 
 
 # The last frame we looked at, as a tiny greyscale thumbnail. Kept in memory
@@ -350,7 +439,7 @@ async def capture_one() -> str | None:
             return SKIPPED
     ts = time.time()
     dst = _path_for(ts, cam)
-    written = await asyncio.to_thread(_shrink, raw, dst)
+    written = await asyncio.to_thread(_shrink, raw, dst, ts)
     try:
         os.remove(raw)
     except OSError:
@@ -358,6 +447,10 @@ async def capture_one() -> str | None:
     if not written:
         return None
     _last_kept = ts
+    if stamped():
+        # tell the retro-stamper this one is already done, so it never
+        # re-encodes a frame twice
+        store.put(f"tl_stamped_upto_{cam}", f"{ts:.0f}")
     archive_size_mb()   # make sure the running total is initialised
     _size_bytes += written
     return dst

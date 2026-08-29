@@ -398,6 +398,9 @@ def tl_setup_kb() -> InlineKeyboardMarkup:
     if timelapse.motion_only():
         rows.append([(f"📶 Чувствительность: {sens[timelapse.motion_level()]}",
                       "tl:set:sens")])
+    rows.append([("🕒 Время на кадре: показывать" if timelapse.stamped()
+                  else "🕒 Время на кадре: нет", "tl:set:stamp")])
+    rows.append([("🕒 Подписать кадры, снятые раньше", "tl:stampold")])
     other = "1" if timelapse.camera() == "0" else "0"
     other_name = "фронтальной" if other == "1" else "задней"
     if timelapse.count(other):
@@ -936,6 +939,8 @@ async def timelapse_cb(q, ctx, what: str) -> None:
             steps = ["low", "mid", "high"]
             store.put("tl_motion_level",
                       steps[(steps.index(timelapse.motion_level()) + 1) % len(steps)])
+        elif key == "stamp":
+            store.set_flag("tl_stamp", not timelapse.stamped())
         elif key == "backbtn":
             store.set_flag("show_back_cam", not store.flag("show_back_cam", True))
             await q.answer("Клавиатура обновится")
@@ -944,6 +949,21 @@ async def timelapse_cb(q, ctx, what: str) -> None:
             return
         await q.answer("Поменял")
         await q.edit_message_reply_markup(reply_markup=tl_setup_kb())
+        return
+
+    if what == "stampold":
+        await q.answer("Подписываю…")
+        note = await chat.send_message(
+            "⏳ Проставляю время на старых кадрах…\n"
+            "<i>Каждый кадр пересохраняется, так что это не мгновенно.</i>",
+            parse_mode=ParseMode.HTML)
+        done, failed = await asyncio.to_thread(timelapse.stamp_existing)
+        await note.edit_text(
+            f"🕒 Подписал {done} кадров."
+            + (f" Не осилил {failed}." if failed else "")
+            + ("\n<i>Новые кадры подписываются сразу при съёмке.</i>" if done else
+               "\n<i>Все кадры уже были подписаны.</i>"),
+            parse_mode=ParseMode.HTML)
         return
 
     if what.startswith("wipe:"):
