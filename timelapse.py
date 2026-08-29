@@ -274,6 +274,7 @@ def _shrink(src: str, dst: str) -> int:
 # only — after a restart the first frame is always saved, which is fine.
 _last_thumb: Image.Image | None = None
 _last_kept: float = 0.0
+_last_cam: str | None = None
 
 
 def _thumb(path: str) -> Image.Image | None:
@@ -330,8 +331,12 @@ async def capture_one() -> str | None:
     archive from being 90% empty room, which is what makes a whole day
     watchable in a few seconds.
     """
-    global _size_bytes, _last_kept
+    global _size_bytes, _last_kept, _last_thumb, _last_cam
     cam = camera()
+    if cam != _last_cam:
+        # the two cameras face opposite ways — comparing across a switch would
+        # read as one enormous movement
+        _last_thumb, _last_cam = None, cam
     raw = await actions.photo(cam)
     if not raw:
         return None
