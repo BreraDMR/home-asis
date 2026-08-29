@@ -33,19 +33,24 @@ seconds, around the clock, oldest frames deleted once the archive hits its
 size cap. Nothing to start, nothing to stop — you only ever look backwards.
 
 - interval 5 / 10 / 15 / 20 / 30 / 60 s, 20 by default
-- clips of the last 30 s, 1, 2, 3, 10, 30 minutes or an hour, sent as a GIF
+- clips of the last 30 s, 1, 2, 3, 10, 30 minutes, an hour, 3, 6, 12 hours or
+  a whole day, as an h264 video
+- long windows are thinned before encoding, so a day is a minute of playback
+  in a few megabytes rather than four thousand frames nobody will watch
 - "what did it look like at 15:10" returns the three nearest frames
-- frames are resized on the way in, so a 5 GB archive holds about two weeks
-  at the default settings
+- **motion mode**: keep a frame only when the picture actually changed
 
 Frames live in `frames/<date>/<hour>/<mmss>.jpg` — the filesystem is the
 index, so a window of time is one or two directory reads and nothing goes
 stale if the process is killed mid-write.
 
-There is no mp4 here, and that's not a shortcut: ffmpeg is installed on this
-phone but refuses to run at all (Termux's 8.1.2 build under Android 7 exits
-silently, not even `-version` prints). Frames are resized and clips are
-assembled with Pillow instead.
+Motion detection is a 64-px greyscale thumbnail compared against the previous
+one: mean brightness change per pixel, thresholded. Small enough that sensor
+noise averages out — an empty room sits around 2, someone walking through
+pushes it past 30. The camera still fires on every tick, because there is no
+other way to notice movement without a hardware PIR sensor, so this saves
+archive rather than battery. One frame every ten minutes is kept whatever
+happens, so a quiet night still proves the camera was alive.
 
 **Watchers (the phone messages you on its own)**
 
@@ -137,14 +142,20 @@ and for the pairing dialog above.
 On the phone, inside Termux:
 
 ```sh
-pkg install python termux-api python-pillow matplotlib
+pkg install python termux-api python-pillow matplotlib ffmpeg
 pip install python-telegram-bot websockets
 ```
 
-Pillow does the timelapse work and matplotlib draws the presence chart; both
-install as Termux packages, not through pip. `ffmpeg` would turn microphone
-recordings into proper Telegram voice messages, but on this phone it doesn't
-run at all, so they arrive as audio files.
+Pillow resizes the timelapse frames, matplotlib draws the presence chart and
+ffmpeg encodes the clips; all three install as Termux packages, not through
+pip.
+
+If ffmpeg exits silently with status 1 — no output at all, not even for
+`-version` — its libraries are fine and the problem is one symbol: `libplacebo`
+wants `__from_chars_floating_point` from a newer `libc++` than is installed.
+`pkg upgrade libc++` fixes it. `ldd` doesn't exist here to tell you that;
+`python -c 'import ctypes; ctypes.CDLL("libavfilter.so.11")'` does, because
+dlopen prints the missing symbol.
 
 The Termux:API companion app must be installed from the **same source** as
 Termux itself (both from GitHub releases, or both from F-Droid). Mixed signatures
