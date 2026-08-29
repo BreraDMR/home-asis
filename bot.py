@@ -55,16 +55,22 @@ BTN_TV, BTN_WHO = "📺 Телевизор", "👥 Кто дома"
 BTN_HOME, BTN_NETS = "🏠 Дом", "📶 Сети"
 BTN_SETTINGS = "⚙️ Настройки"
 
-MAIN_KB = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton(BTN_BACK_CAM), KeyboardButton(BTN_FRONT_CAM)],
-        [KeyboardButton(BTN_TIMELAPSE), KeyboardButton(BTN_STATUS)],
-        [KeyboardButton(BTN_TV), KeyboardButton(BTN_WHO)],
-        [KeyboardButton(BTN_HOME), KeyboardButton(BTN_NETS)],
-        [KeyboardButton(BTN_SETTINGS)],
-    ],
-    resize_keyboard=True,
-)
+def main_kb() -> ReplyKeyboardMarkup:
+    """The back camera points at the TV, not into the room, so its button can
+    be hidden — otherwise it's the one you hit by accident."""
+    cams = [KeyboardButton(BTN_FRONT_CAM)]
+    if store.flag("show_back_cam", True):
+        cams.insert(0, KeyboardButton(BTN_BACK_CAM))
+    return ReplyKeyboardMarkup(
+        [
+            cams,
+            [KeyboardButton(BTN_TIMELAPSE), KeyboardButton(BTN_STATUS)],
+            [KeyboardButton(BTN_TV), KeyboardButton(BTN_WHO)],
+            [KeyboardButton(BTN_HOME), KeyboardButton(BTN_NETS)],
+            [KeyboardButton(BTN_SETTINGS)],
+        ],
+        resize_keyboard=True,
+    )
 
 
 def ikb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
@@ -98,7 +104,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     store.put("chat_id", str(update.effective_chat.id))
     await update.message.reply_text(
         "🏠 <b>Home Asis</b> на связи.\nВыбирай раздел кнопками снизу.",
-        reply_markup=MAIN_KB,
+        reply_markup=main_kb(),
         parse_mode=ParseMode.HTML,
     )
 
@@ -392,6 +398,12 @@ def tl_setup_kb() -> InlineKeyboardMarkup:
     if timelapse.motion_only():
         rows.append([(f"📶 Чувствительность: {sens[timelapse.motion_level()]}",
                       "tl:set:sens")])
+    other = "1" if timelapse.camera() == "0" else "0"
+    other_name = "фронтальной" if other == "1" else "задней"
+    if timelapse.count(other):
+        rows.append([(f"🧹 Стереть кадры {other_name} камеры", f"tl:wipe:{other}")])
+    rows.append([("📷 Кнопка задней камеры: скрыта" if not store.flag("show_back_cam", True)
+                  else "📷 Кнопка задней камеры: видна", "tl:set:backbtn")])
     rows.append([("↩️ Назад", "tl:menu")])
     return ikb(rows)
 
@@ -550,7 +562,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 "Телевизор на связи, но ссылку не принял — попробуй ещё раз.")
         return
 
-    await update.message.reply_text("Не понял. Пользуйся кнопками снизу.", reply_markup=MAIN_KB)
+    await update.message.reply_text("Не понял. Пользуйся кнопками снизу.", reply_markup=main_kb())
 
 
 # ---------------------------------------------------------------- callbacks
@@ -924,7 +936,23 @@ async def timelapse_cb(q, ctx, what: str) -> None:
             steps = ["low", "mid", "high"]
             store.put("tl_motion_level",
                       steps[(steps.index(timelapse.motion_level()) + 1) % len(steps)])
+        elif key == "backbtn":
+            store.set_flag("show_back_cam", not store.flag("show_back_cam", True))
+            await q.answer("Клавиатура обновится")
+            await chat.send_message("Главное меню:", reply_markup=main_kb())
+            await q.edit_message_reply_markup(reply_markup=tl_setup_kb())
+            return
         await q.answer("Поменял")
+        await q.edit_message_reply_markup(reply_markup=tl_setup_kb())
+        return
+
+    if what.startswith("wipe:"):
+        cam = what.split(":", 1)[1]
+        await q.answer("Стираю…")
+        files, mb = await asyncio.to_thread(timelapse.drop_camera, cam)
+        which = "фронтальной" if cam == "1" else "задней"
+        await chat.send_message(
+            f"🧹 Стёр {files} кадров {which} камеры, освободилось {mb} МБ.")
         await q.edit_message_reply_markup(reply_markup=tl_setup_kb())
         return
 

@@ -6,16 +6,19 @@ just go back and look at what was already there.
 
 Frames live on disk, not in the database:
 
-    frames/2026-08-28/23/1405.jpg     <- 23:14:05
+    frames/2026-08-28/23/1405_1.jpg   <- 23:14:05, front camera
 
 The filesystem is the index. Picking a time window means reading one or two
 hour directories, which is cheap, and nothing goes stale if the bot is killed
 mid-write. home.db stays small and backup-friendly.
 
-Why not video: ffmpeg on this phone is installed but refuses to run at all
-(Termux's 8.1.2 build against Android 7 — it exits silently, no output, not
-even for -version). So frames are resized with Pillow, and a "clip" is a GIF
-built with Pillow too. Same result, one less broken dependency.
+The camera id in the name matters: the two cameras look at opposite sides of
+the room, and a clip that silently mixed them was the first real bug here.
+Everything that reads frames back filters by camera, defaulting to the one
+being recorded now.
+
+Frames are resized with Pillow on the way in; clips are h264, encoded by
+ffmpeg on the phone.
 """
 from __future__ import annotations
 
@@ -123,10 +126,24 @@ def motion_level() -> str:
 
 # ---------------------------------------------------------------- paths
 
-def _path_for(ts: float) -> str:
+def _path_for(ts: float, cam: str) -> str:
+    """…/2026-08-29/10/3948_1.jpg — the camera id is part of the name.
+
+    Without it, switching cameras silently mixed two different views into one
+    archive: a day-long clip pulled mostly yesterday's frames from the back
+    camera and looked like the setting hadn't applied at all.
+    """
     t = dt.datetime.fromtimestamp(ts)
     return os.path.join(ROOT, t.strftime("%Y-%m-%d"), t.strftime("%H"),
-                        t.strftime("%M%S") + ".jpg")
+                        f"{t.strftime('%M%S')}_{cam}.jpg")
+
+
+def _cam_of(path: str) -> str:
+    """Which camera took this frame. Files from before the rename are back-camera."""
+    name = os.path.basename(path)
+    if "_" in name:
+        return name.split("_", 1)[1].split(".", 1)[0]
+    return "0"
 
 
 def _ts_of(path: str) -> float | None:
@@ -154,11 +171,13 @@ def _hour_dirs() -> list[str]:
     return out
 
 
-def _frames_in(hour_dir: str) -> list[tuple[float, str]]:
+def _frames_in(hour_dir: str, cam: str | None = None) -> list[tuple[float, str]]:
     out = []
     try:
         for entry in os.scandir(hour_dir):
             if not entry.name.endswith(".jpg"):
+                continue
+            if cam is not None and _cam_of(entry.path) != cam:
                 continue
             ts = _ts_of(entry.path)
             if ts is not None:
@@ -312,7 +331,8 @@ async def capture_one() -> str | None:
     watchable in a few seconds.
     """
     global _size_bytes, _last_kept
-    raw = await actions.photo(camera())
+    cam = camera()
+    raw = await actions.photo(cam)
     if not raw:
         return None
     if motion_only():
@@ -324,7 +344,7 @@ async def capture_one() -> str | None:
                 pass
             return SKIPPED
     ts = time.time()
-    dst = _path_for(ts)
+    dst = _path_for(ts, cam)
     written = await asyncio.to_thread(_shrink, raw, dst)
     try:
         os.remove(raw)
@@ -371,15 +391,21 @@ async def recorder(send=None) -> None:
 
 # ---------------------------------------------------------------- reading back
 
-def frames_between(t0: float, t1: float) -> list[tuple[float, str]]:
-    """Every frame in [t0, t1], oldest first."""
+def frames_between(t0: float, t1: float, cam: str | None = "current") -> list[tuple[float, str]]:
+    """Every frame in [t0, t1], oldest first.
+
+    Defaults to the camera currently being recorded — mixing two viewpoints in
+    one clip is never what you wanted.
+    """
+    if cam == "current":
+        cam = camera()
     out: list[tuple[float, str]] = []
     cur = dt.datetime.fromtimestamp(t0).replace(minute=0, second=0, microsecond=0)
     end = dt.datetime.fromtimestamp(t1)
     while cur <= end:
         hour_dir = os.path.join(ROOT, cur.strftime("%Y-%m-%d"), cur.strftime("%H"))
         if os.path.isdir(hour_dir):
-            out.extend((ts, p) for ts, p in _frames_in(hour_dir) if t0 <= ts <= t1)
+            out.extend((ts, p) for ts, p in _frames_in(hour_dir, cam) if t0 <= ts <= t1)
         cur += dt.timedelta(hours=1)
     out.sort()
     return out
@@ -401,20 +427,47 @@ def nearest(target: float, count: int = 3) -> list[tuple[float, str]]:
     return []
 
 
-def bounds() -> tuple[float, float] | None:
+def bounds(cam: str | None = "current") -> tuple[float, float] | None:
     """(oldest, newest) frame timestamps, or None if the archive is empty."""
-    hours = _hour_dirs()
+    if cam == "current":
+        cam = camera()
+    hours = [h for h in _hour_dirs() if _frames_in(h, cam)]
     if not hours:
         return None
-    first = _frames_in(hours[0])
-    last = _frames_in(hours[-1])
+    first = _frames_in(hours[0], cam)
+    last = _frames_in(hours[-1], cam)
     if not first or not last:
         return None
     return first[0][0], last[-1][0]
 
 
-def count() -> int:
-    return sum(len(_frames_in(h)) for h in _hour_dirs())
+def count(cam: str | None = "current") -> int:
+    if cam == "current":
+        cam = camera()
+    return sum(len(_frames_in(h, cam)) for h in _hour_dirs())
+
+
+def drop_camera(cam: str) -> tuple[int, int]:
+    """Delete every frame taken with one camera. Returns (files, megabytes)."""
+    global _size_bytes
+    files = freed = 0
+    for hour_dir in _hour_dirs():
+        for _, path in _frames_in(hour_dir, cam):
+            try:
+                size = os.path.getsize(path)
+                os.remove(path)
+                files += 1
+                freed += size
+            except OSError:
+                pass
+        for d in (hour_dir, os.path.dirname(hour_dir)):
+            try:
+                os.rmdir(d)
+            except OSError:
+                pass
+    if _size_known:
+        _size_bytes = max(0, _size_bytes - freed)
+    return files, freed // (1024 * 1024)
 
 
 # ---------------------------------------------------------------- clips
