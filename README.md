@@ -39,6 +39,9 @@ size cap. Nothing to start, nothing to stop — you only ever look backwards.
   in a few megabytes rather than four thousand frames nobody will watch
 - "what did it look like at 15:10" returns the three nearest frames
 - **motion mode**: keep a frame only when the picture actually changed
+- the date and time are burnt into the corner of every frame — not added as a
+  caption, because a caption is gone the moment the frames become a video.
+  Frames saved before this existed can be back-filled from the settings
 
 Frames live in `frames/<date>/<hour>/<mmss>.jpg` — the filesystem is the
 index, so a window of time is one or two directory reads and nothing goes

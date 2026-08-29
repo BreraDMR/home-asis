@@ -331,20 +331,26 @@ def _shrink(src: str, dst: str, ts: float) -> int:
 def stamp_existing(cam: str | None = "current") -> tuple[int, int]:
     """Burn the time into frames that were saved before stamping existed.
 
-    Works off the timestamp in the filename, so it's exact — no guessing from
-    file mtimes, which a copy or an rsync would have destroyed. Re-encoding
-    costs a little quality, so each frame is only ever done once: the marker
-    file next to the archive remembers where we got to.
+    Two markers, not one, and the difference matters: `tl_stamp_since` is when
+    the recorder started stamping frames as it saved them, and everything
+    newer than that is already done. `tl_stamp_retro` is how far back-filling
+    has got. Retro work happens strictly between them, so no frame is ever
+    re-encoded twice and none is skipped — the first version used a single
+    marker, the recorder pushed it to "now", and the old frames it was
+    supposed to fix ended up on the wrong side of it.
+
+    Times come from the filename, so they're exact: file mtimes would lie
+    after any copy.
     """
     if cam == "current":
         cam = camera()
-    done_key = f"tl_stamped_upto_{cam or 'all'}"
-    already = float(store.get(done_key, "0") or 0)
-    stamped_now, failed = 0, 0
-    newest = already
+    since = float(store.get("tl_stamp_since", "0") or 0) or time.time()
+    retro_key = f"tl_stamp_retro_{cam or 'all'}"
+    from_ts = float(store.get(retro_key, "0") or 0)
+    stamped_now, failed, newest = 0, 0, from_ts
     for hour_dir in _hour_dirs():
         for ts, path in _frames_in(hour_dir, cam):
-            if ts <= already:
+            if ts <= from_ts or ts >= since:
                 continue
             try:
                 im = Image.open(path).convert("RGB")
@@ -354,8 +360,8 @@ def stamp_existing(cam: str | None = "current") -> tuple[int, int]:
                 newest = max(newest, ts)
             except Exception:
                 failed += 1
-    if newest > already:
-        store.put(done_key, f"{newest:.0f}")
+    if newest > from_ts:
+        store.put(retro_key, f"{newest:.0f}")
     return stamped_now, failed
 
 
@@ -447,10 +453,10 @@ async def capture_one() -> str | None:
     if not written:
         return None
     _last_kept = ts
-    if stamped():
-        # tell the retro-stamper this one is already done, so it never
-        # re-encodes a frame twice
-        store.put(f"tl_stamped_upto_{cam}", f"{ts:.0f}")
+    if stamped() and not store.get("tl_stamp_since"):
+        # the moment stamping went live: everything from here on is stamped as
+        # it's saved, everything before it is the back-filler's job
+        store.put("tl_stamp_since", f"{ts:.0f}")
     archive_size_mb()   # make sure the running total is initialised
     _size_bytes += written
     return dst
