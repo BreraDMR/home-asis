@@ -614,6 +614,31 @@ def _build_gif(frames: list[tuple[float, str]], out: str, px: int, ms: int) -> b
     return os.path.getsize(out) > 0
 
 
+def _clip_shape(frames: list[tuple[float, str]], px: int) -> tuple[int, int]:
+    """How big the video should be: the shape most of the frames have.
+
+    ffmpeg takes the geometry of the *first* frame in the sequence and scales
+    everything else to it. One leftover frame from an older rotation was
+    enough to make a whole day of landscape look squeezed into a portrait
+    video, so the majority decides, and the odd one out gets padded below.
+    """
+    seen: dict[tuple[int, int], int] = {}
+    # opening a jpeg only reads its header, but a day is a few hundred frames
+    # and the phone is slow — a spread-out sample says the same thing
+    step = max(1, len(frames) // 80)
+    for _, path in frames[::step]:
+        try:
+            with Image.open(path) as im:
+                seen[im.size] = seen.get(im.size, 0) + 1
+        except Exception:
+            continue
+    if not seen:
+        return px, px * 3 // 4
+    w, h = max(seen.items(), key=lambda kv: kv[1])[0]
+    height = max(2, round(px * h / w))
+    return px - px % 2, height - height % 2
+
+
 async def _build_mp4(frames: list[tuple[float, str]], out: str, px: int, fps: int) -> bool:
     """Hand the frames to ffmpeg as a numbered sequence of symlinks.
 
@@ -621,6 +646,7 @@ async def _build_mp4(frames: list[tuple[float, str]], out: str, px: int, fps: in
     that for free, no copying of a few hundred megabytes involved.
     """
     seq = tempfile.mkdtemp(prefix="seq_", dir=actions.TMP)
+    w, h = _clip_shape(frames, px)
     try:
         for i, (_, path) in enumerate(frames, 1):
             try:
@@ -632,9 +658,12 @@ async def _build_mp4(frames: list[tuple[float, str]], out: str, px: int, fps: in
             "-framerate", str(fps), "-i", os.path.join(seq, "%06d.jpg"),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "32",
             "-pix_fmt", "yuv420p",
+            # fit-and-pad instead of a plain scale: a frame of a different
+            # shape gets black bars, it doesn't get stretched.
             # a dark room is mostly sensor noise, and noise is what makes an
             # otherwise tiny timelapse balloon — denoise before encoding
-            "-vf", f"scale={px}:-2,hqdn3d=4:3:6:4",
+            "-vf", (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                    f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,hqdn3d=4:3:6:4"),
             "-movflags", "+faststart", out,
         ], timeout=900)
         if code != 0:
