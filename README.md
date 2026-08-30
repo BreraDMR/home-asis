@@ -104,6 +104,10 @@ better at everything else. So power goes over IR, the rest over the network,
 and the channel-zapping and TV-settings buttons are left out entirely.
 The ▶️ YouTube button on it is a macro — if the set is off it fires IR power,
 waits for the TV to come back on the network, and then launches the app.
+There is no source list on it either: the only input anyone ever picks is the
+computer, so it's a plain **🖥 HDMI 1** button. The id of that socket is asked
+from the TV the first time and kept in `home.db` — webOS calls it `HDMI_1`
+here, but that isn't worth hardcoding sight unseen.
 
 **Over the network — `tv.py`.** The set is on the router by cable, so we speak
 SSAP, LG's own WebSocket protocol on port 3000. This is the good one: launching

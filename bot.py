@@ -262,7 +262,8 @@ def tv_mix_kb() -> InlineKeyboardMarkup:
         [("⬇️", "tvn:btn:DOWN")],
         [("↩️ Назад", "tvn:btn:BACK"), ("🏠 Home", "tvn:btn:HOME")],
         [("▶️ YouTube", "tvn:youtube"), ("📱 Приложения", "tvn:apps")],
-        [("🌐 Браузер", "tvn:browser"), ("ℹ️ Что на экране", "tvn:status")],
+        [("🖥 HDMI 1 (комп)", "tvn:hdmi1"), ("🌐 Браузер", "tvn:browser")],
+        [("ℹ️ Что на экране", "tvn:status")],
     ])
 
 
@@ -1132,6 +1133,25 @@ async def tv_net_cb(q, ctx, what: str) -> None:
         elif what.startswith("in:"):
             await t.switch_input(what.split(":", 1)[1])
             await q.answer("🔌 Переключил")
+
+        elif what == "hdmi1":
+            # The list of sources was a menu you had to walk through, and the
+            # only source ever picked is the computer on HDMI 1. Ask the TV
+            # once what it calls that socket, then remember it — webOS says
+            # HDMI_1 here, but that's not worth hardcoding blind.
+            input_id = store.get("tv_hdmi1_input")
+            if not input_id:
+                for d in await t.inputs():
+                    ident = d.get("id") or ""
+                    if "hdmi" in ident.lower() and "1" in ident:
+                        input_id = ident
+                        store.put("tv_hdmi1_input", input_id)
+                        break
+            if not input_id:
+                await q.answer("Телевизор не показал вход HDMI 1", show_alert=True)
+                return
+            await t.switch_input(input_id)
+            await q.answer("🖥 HDMI 1")
 
         elif what == "youtube":
             # The one-tap macro: wake the set if it's off, then go straight
