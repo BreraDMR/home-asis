@@ -44,6 +44,10 @@ log = logging.getLogger("homebot")
 
 TOKEN = os.environ["HOMEBOT_TOKEN"]
 OWNERS = {int(x) for x in os.environ.get("HOMEBOT_OWNERS", "").replace(" ", "").split(",") if x}
+# People who are handed the TV remote and nothing else: no cameras, no
+# archive, no network, no settings — those buttons aren't even drawn for them.
+GUESTS = {int(x) for x in os.environ.get("HOMEBOT_GUESTS", "").replace(" ", "").split(",")
+          if x} - OWNERS
 
 # ---------------------------------------------------------------- keyboard
 
@@ -73,6 +77,11 @@ def main_kb() -> ReplyKeyboardMarkup:
     )
 
 
+def guest_kb() -> ReplyKeyboardMarkup:
+    """A guest gets one button, and it's the remote."""
+    return ReplyKeyboardMarkup([[KeyboardButton(BTN_TV)]], resize_keyboard=True)
+
+
 def ikb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton(t, callback_data=d) for t, d in row] for row in rows]
@@ -84,9 +93,26 @@ def allowed(update: Update) -> bool:
     return bool(user and (not OWNERS or user.id in OWNERS))
 
 
-async def guard(update: Update) -> bool:
-    if allowed(update):
+def is_guest(update: Update) -> bool:
+    user = update.effective_user
+    return bool(user and user.id in GUESTS) and not allowed(update)
+
+
+# Everything a remote is made of. A guest's button press has to start with one
+# of these — macros live here too, they're recorded IR sequences for the set.
+GUEST_CB = ("tv:", "tvn:", "tvc:", "tvp:", "tvpick:", "macro:")
+
+
+async def guard(update: Update, guest_ok: bool = False) -> bool:
+    if allowed(update) or (guest_ok and is_guest(update)):
         return True
+    if is_guest(update):
+        if update.message:
+            await update.message.reply_text("Тебе доступен только пульт от телевизора.",
+                                            reply_markup=guest_kb())
+        elif update.callback_query:
+            await update.callback_query.answer("Только пульт.", show_alert=True)
+        return False
     who = update.effective_user
     log.warning("отказано: %s (%s)", who.id if who else "?", who.username if who else "?")
     if update.message:
@@ -99,8 +125,15 @@ async def guard(update: Update) -> bool:
 # ---------------------------------------------------------------- sections
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, guest_ok=True):
         return
+    if is_guest(update):
+        await update.message.reply_text(
+            "📺 <b>Пульт от телевизора</b>\nЖми кнопку снизу.",
+            reply_markup=guest_kb(), parse_mode=ParseMode.HTML)
+        return await section_tv(update, ctx)
+    # only the owner's chat gets the notifications — a guest saying /start
+    # must not quietly redirect them to himself
     store.put("chat_id", str(update.effective_chat.id))
     await update.message.reply_text(
         "🏠 <b>Home Asis</b> на связи.\nВыбирай раздел кнопками снизу.",
@@ -479,12 +512,23 @@ def parse_moment(text: str) -> float | None:
 
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, guest_ok=True):
         return
     text = (update.message.text or "").strip()
+    guest = is_guest(update)
 
     if text in ("/start", "/menu"):
         return await start(update, ctx)
+
+    if guest:
+        # a guest gets the remote and the YouTube link trick, nothing else
+        waiting = ctx.user_data.get("await")
+        if text != BTN_TV and waiting not in ("tv_type", "tv_toast") \
+                and not tv.video_id(text):
+            ctx.user_data.pop("await", None)
+            await update.message.reply_text("Тебе доступен только пульт от телевизора.",
+                                            reply_markup=guest_kb())
+            return
 
     waiting = ctx.user_data.pop("await", None)
     if waiting == "say":
@@ -570,17 +614,22 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 "Телевизор на связи, но ссылку не принял — попробуй ещё раз.")
         return
 
-    await update.message.reply_text("Не понял. Пользуйся кнопками снизу.", reply_markup=main_kb())
+    await update.message.reply_text("Не понял. Пользуйся кнопками снизу.",
+                                    reply_markup=guest_kb() if guest else main_kb())
 
 
 # ---------------------------------------------------------------- callbacks
 
 async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await guard(update):
+    if not await guard(update, guest_ok=True):
         return
     q = update.callback_query
     data = q.data or ""
     chat = q.message.chat
+
+    if is_guest(update) and not data.startswith(GUEST_CB):
+        await q.answer("Только пульт.", show_alert=True)
+        return
 
     if data.startswith("tl:"):
         await timelapse_cb(q, ctx, data.split(":", 1)[1])

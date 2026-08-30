@@ -175,10 +175,19 @@ Copy `.env.example` to `.env` and fill it in:
 ```
 HOMEBOT_TOKEN=<token from @BotFather>
 HOMEBOT_OWNERS=<your telegram id>[,<second id>]
+HOMEBOT_GUESTS=<telegram id>[,<second id>]
 ```
 
 `HOMEBOT_OWNERS` is a hard allowlist: anyone else gets "this bot is private"
 and nothing else. The file is git-ignored and never leaves the phone.
+
+`HOMEBOT_GUESTS` hands someone the TV remote and nothing else. A guest sees a
+keyboard with a single 📺 button, all three remotes behind it, and can paste a
+YouTube link like the owner can. Cameras, the archive, the network scans and
+the settings are not just refused — they are never drawn, and a callback from
+outside the remote is turned away even if the button is somehow forged. A
+guest's `/start` also leaves the notification chat alone, so alerts keep going
+to the owner.
 
 ## Running it
 
