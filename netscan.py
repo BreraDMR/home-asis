@@ -6,9 +6,12 @@ No nmap here on purpose — a plain ping sweep fills the kernel ARP table and
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 
 from actions import run, wifi_info, wifi_scan
+
+log = logging.getLogger("homebot.netscan")
 
 ARP = "/proc/net/arp"
 # 02:00:00:00:00:00 is what Android reports for itself when it hides its mac
@@ -61,7 +64,10 @@ async def arp_table(prefix: str | None = None, own_ip: str | None = None) -> dic
                 if prefix and not ip.startswith(prefix + "."):
                     continue
                 found[mac.lower()] = ip
-    except Exception:
+    except Exception as e:
+        # An empty scan and an unreadable /proc/net/arp look identical from
+        # the outside, and "nobody is home" is a bad way to report a bug.
+        log.warning("could not read %s: %s", ARP, e)
         return {}
     # the phone itself never shows up in its own ARP table — add it by hand
     if own_ip:
