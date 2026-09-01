@@ -34,7 +34,12 @@ async def _ping(host: str) -> None:
 
 
 async def sweep(concurrency: int = 48) -> dict[str, str]:
-    """Ping the whole /24, then read the ARP table. Returns {mac: ip}."""
+    """Ping the whole /24, then read the ARP table. Returns {mac: ip}.
+
+    A /24 is assumed, which is what home routers hand out. On anything wider
+    this finds only the neighbours sharing the first three octets - it will
+    not hang, it will just quietly see less.
+    """
     sub = await _own_subnet()
     if not sub:
         return {}
