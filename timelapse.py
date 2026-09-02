@@ -37,8 +37,93 @@ import store
 
 log = logging.getLogger("homebot.timelapse")
 
-ROOT = os.path.expanduser("~/lab/homebot/frames")
-os.makedirs(ROOT, exist_ok=True)
+# Where frames live. Internal storage is always there; the memory card is a
+# bonus that may or may not be in the slot right now, so nothing depends on it.
+#
+# Android only lets an app write to its own corner of a removable card —
+# /storage/<UUID>/Android/data/com.termux/files — and termux-setup-storage
+# parks a symlink at ~/storage/external-1 pointing exactly there. That symlink
+# is the whole detection story; if it isn't there, storage permission was never
+# granted and we stay on internal.
+INTERNAL = os.path.expanduser("~/lab/homebot/frames")
+os.makedirs(INTERNAL, exist_ok=True)
+
+EXTERNAL_LINK = os.path.expanduser("~/storage/external-1")
+
+# Probing the card means touching the filesystem, and the recorder asks where
+# to write on every tick. Once a minute is often enough to notice a card that
+# was pulled out.
+_CARD_RECHECK = 60.0
+_card_at = 0.0
+_card_path: str | None = None
+
+
+def _probe_card() -> str | None:
+    """The frames directory on the card, if the card is in and we can write.
+
+    Writability is checked by actually writing: the mount can be there and
+    still be read-only (card write-protected, or the FUSE view not handed to
+    us), and finding that out on the first frame is too late.
+    """
+    base = EXTERNAL_LINK
+    if not os.path.isdir(base):
+        # the symlink is the normal route, but a card mounted after the fact
+        # shows up under /storage/XXXX-XXXX all the same
+        for entry in ("/storage",):
+            try:
+                for name in os.listdir(entry):
+                    if len(name) == 9 and name[4] == "-":
+                        cand = os.path.join(entry, name, "Android", "data",
+                                            "com.termux", "files")
+                        if os.path.isdir(cand):
+                            base = cand
+                            break
+            except OSError:
+                pass
+        if not os.path.isdir(base):
+            return None
+    path = os.path.join(base, "frames")
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".writable")
+        with open(probe, "w") as fh:
+            fh.write("1")
+        os.remove(probe)
+        return path
+    except OSError:
+        return None
+
+
+def card_root(force: bool = False) -> str | None:
+    global _card_at, _card_path
+    if force or time.time() - _card_at > _CARD_RECHECK:
+        _card_path = _probe_card()
+        _card_at = time.time()
+    return _card_path
+
+
+def use_card() -> bool:
+    """Should new frames go to the card when one is available?"""
+    return store.flag("tl_use_card", True)
+
+
+def ROOT_write() -> str:
+    """Where the next frame gets written."""
+    if use_card():
+        card = card_root()
+        if card:
+            return card
+    return INTERNAL
+
+
+def _roots() -> list[str]:
+    """Every place frames may be read from, so an archive split across a card
+    swap still reads as one timeline."""
+    out = [INTERNAL]
+    card = card_root()
+    if card and card not in out:
+        out.append(card)
+    return [r for r in out if os.path.isdir(r)]
 
 # what the buttons offer, in seconds
 INTERVALS = (5, 10, 15, 20, 30, 60)
@@ -105,6 +190,42 @@ def limit_mb() -> int:
     return _int("tl_limit_mb", DEFAULT_LIMIT_MB)
 
 
+def limit_steps() -> list[int]:
+    """What the "archive limit" button cycles through.
+
+    The big sizes only appear once a card is actually in — offering 25 GB on a
+    phone with 6 GB free would just be a way to fill the thing up.
+    """
+    steps = [1024, 2048, 5120, 7168]
+    card = card_root()
+    if card:
+        try:
+            free_gb = shutil.disk_usage(card).free // (1024 ** 3)
+        except OSError:
+            free_gb = 0
+        for gb in (10, 15, 20, 25, 30, 40, 60):
+            if gb + 2 <= free_gb + limit_mb() // 1024:
+                steps.append(gb * 1024)
+    return steps
+
+
+def storage_note() -> str:
+    """One line for the settings screen: where frames go and how much room is left."""
+    card = card_root()
+    where = ROOT_write()
+    free = _free_mb()
+    if where == INTERNAL:
+        place = "память телефона"
+        if card and not use_card():
+            place += " (карта есть, но выключена)"
+        elif not card:
+            place += " (карты нет)"
+    else:
+        place = "карта памяти"
+    return f"{place}, свободно {free // 1024} ГБ" if free >= 1024 else \
+           f"{place}, свободно {free} МБ"
+
+
 def rotate() -> int:
     """Degrees to turn each frame. The phone usually lies on its side."""
     return _int("tl_rotate", 0) % 360
@@ -126,16 +247,30 @@ def motion_level() -> str:
 
 # ---------------------------------------------------------------- paths
 
-def _path_for(ts: float, cam: str) -> str:
+def _path_for(ts: float, cam: str, seq: int = 0) -> str:
     """…/2026-08-29/10/3948_1.jpg — the camera id is part of the name.
 
     Without it, switching cameras silently mixed two different views into one
     archive: a day-long clip pulled mostly yesterday's frames from the back
     camera and looked like the setting hadn't applied at all.
+
+    `seq` only kicks in when two frames land in the same second — a photo taken
+    by hand right as the recorder fires. It goes before the camera id so the
+    name still parses the same way at both ends.
     """
     t = dt.datetime.fromtimestamp(ts)
-    return os.path.join(ROOT, t.strftime("%Y-%m-%d"), t.strftime("%H"),
-                        f"{t.strftime('%M%S')}_{cam}.jpg")
+    tail = t.strftime("%M%S") + (f"-{seq}" if seq else "")
+    return os.path.join(ROOT_write(), t.strftime("%Y-%m-%d"), t.strftime("%H"),
+                        f"{tail}_{cam}.jpg")
+
+
+def _free_path(ts: float, cam: str) -> str:
+    """A path for this second that nothing is sitting on yet."""
+    for seq in range(20):
+        path = _path_for(ts, cam, seq)
+        if not os.path.exists(path):
+            return path
+    return _path_for(ts, cam, 99)
 
 
 def _cam_of(path: str) -> str:
@@ -147,10 +282,14 @@ def _cam_of(path: str) -> str:
 
 
 def _ts_of(path: str) -> float | None:
-    """Rebuild the timestamp from the path we wrote it to."""
+    """Rebuild the timestamp from the last three parts of the path.
+
+    Read off the tail rather than relative to a root, because the archive can
+    now be spread over two of them — internal storage and the card.
+    """
     try:
-        rel = os.path.relpath(path, ROOT)
-        day, hour, name = rel.split(os.sep)
+        parts = path.split(os.sep)
+        day, hour, name = parts[-3], parts[-2], parts[-1]
         stamp = f"{day} {hour}:{name[:2]}:{name[2:4]}"
         return dt.datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").timestamp()
     except Exception:
@@ -158,17 +297,33 @@ def _ts_of(path: str) -> float | None:
 
 
 def _hour_dirs() -> list[str]:
-    """Every hour directory we have, oldest first."""
-    out = []
-    for day in sorted(os.listdir(ROOT)) if os.path.isdir(ROOT) else []:
-        dpath = os.path.join(ROOT, day)
-        if not os.path.isdir(dpath):
+    """Every hour directory we have, oldest first, across every root.
+
+    A card swap or a switch back to internal storage leaves frames in both
+    places; sorting by (day, hour) rather than by root keeps them one timeline,
+    so clips still span the seam and the ring still drops the genuinely oldest
+    frames first.
+    """
+    found: list[tuple[tuple[str, str], str]] = []
+    for root in _roots():
+        try:
+            days = sorted(os.listdir(root))
+        except OSError:
             continue
-        for hour in sorted(os.listdir(dpath)):
-            hpath = os.path.join(dpath, hour)
-            if os.path.isdir(hpath):
-                out.append(hpath)
-    return out
+        for day in days:
+            dpath = os.path.join(root, day)
+            if not os.path.isdir(dpath):
+                continue
+            try:
+                hours = sorted(os.listdir(dpath))
+            except OSError:
+                continue
+            for hour in hours:
+                hpath = os.path.join(dpath, hour)
+                if os.path.isdir(hpath):
+                    found.append(((day, hour), hpath))
+    found.sort(key=lambda item: item[0])
+    return [p for _, p in found]
 
 
 def _frames_in(hour_dir: str, cam: str | None = None) -> list[tuple[float, str]]:
@@ -208,7 +363,7 @@ def _measure() -> int:
 
 def _free_mb() -> int:
     try:
-        return shutil.disk_usage(ROOT).free // (1024 * 1024)
+        return shutil.disk_usage(ROOT_write()).free // (1024 * 1024)
     except OSError:
         return 10_000  # can't tell — assume there's room, the cap still applies
 
@@ -348,6 +503,42 @@ async def prepare(src: str, ts: float | None = None) -> str:
     return dst
 
 
+def keep_manual() -> bool:
+    """Do photos taken by hand get filed into the archive too?"""
+    return store.flag("tl_keep_manual", True)
+
+
+def archive_shot(path: str, cam: str, ts: float | None = None) -> str | None:
+    """File a hand-taken photo into the archive. Returns where it landed.
+
+    Until this existed, a photo you asked for by hand was sent to the chat and
+    deleted — so pressing the camera button twenty times left nothing behind,
+    and none of it showed up in a clip. It goes in under the camera that took
+    it, which means a shot from the back camera turns up in back-camera clips,
+    not in whatever the recorder happens to be filming.
+
+    The file is already through prepare(), so it's the same size, rotation and
+    timestamp as everything the recorder saves.
+    """
+    global _size_bytes
+    if not keep_manual():
+        return None
+    ts = ts or time.time()
+    dst = _free_path(ts, cam)
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(path, dst)
+    except OSError as e:
+        log.warning("ручной кадр не лёг в архив: %s", e)
+        return None
+    archive_size_mb()       # make sure the running total is initialised
+    try:
+        _size_bytes += os.path.getsize(dst)
+    except OSError:
+        pass
+    return dst
+
+
 def stamp_existing(cam: str | None = "current") -> tuple[int, int]:
     """Burn the time into frames that were saved before stamping existed.
 
@@ -464,7 +655,7 @@ async def capture_one() -> str | None:
                 pass
             return SKIPPED
     ts = time.time()
-    dst = _path_for(ts, cam)
+    dst = _free_path(ts, cam)
     written = await asyncio.to_thread(_shrink, raw, dst, ts)
     try:
         os.remove(raw)
@@ -485,11 +676,23 @@ async def capture_one() -> str | None:
 async def recorder(send=None) -> None:
     """The forever loop. Started once at boot alongside the watchers."""
     fails = 0
+    where = ROOT_write()
     while True:
         if not enabled():
             await asyncio.sleep(5)
             continue
         started = time.time()
+        # a card that falls out mid-recording just quietly stops being the
+        # write target, and you'd only find out days later by the archive
+        # having gone shallow — say so the moment it happens
+        now_where = ROOT_write()
+        if now_where != where:
+            moved = ("на карту памяти" if now_where != INTERNAL
+                     else "во внутреннюю память — карты больше не видно")
+            log.warning("таймлапс пишет теперь %s", moved)
+            if send:
+                await send(f"📹 Таймлапс переехал {moved}.")
+            where = now_where
         try:
             path = await capture_one()
             if path == SKIPPED:
@@ -527,9 +730,10 @@ def frames_between(t0: float, t1: float, cam: str | None = "current") -> list[tu
     cur = dt.datetime.fromtimestamp(t0).replace(minute=0, second=0, microsecond=0)
     end = dt.datetime.fromtimestamp(t1)
     while cur <= end:
-        hour_dir = os.path.join(ROOT, cur.strftime("%Y-%m-%d"), cur.strftime("%H"))
-        if os.path.isdir(hour_dir):
-            out.extend((ts, p) for ts, p in _frames_in(hour_dir, cam) if t0 <= ts <= t1)
+        for root in _roots():
+            hour_dir = os.path.join(root, cur.strftime("%Y-%m-%d"), cur.strftime("%H"))
+            if os.path.isdir(hour_dir):
+                out.extend((ts, p) for ts, p in _frames_in(hour_dir, cam) if t0 <= ts <= t1)
         cur += dt.timedelta(hours=1)
     out.sort()
     return out
@@ -558,11 +762,17 @@ def bounds(cam: str | None = "current") -> tuple[float, float] | None:
     hours = [h for h in _hour_dirs() if _frames_in(h, cam)]
     if not hours:
         return None
-    first = _frames_in(hours[0], cam)
-    last = _frames_in(hours[-1], cam)
+
+    # the same hour can exist under two roots at once (a card swap mid-hour),
+    # so take the extremes of every directory sharing the edge hour
+    def key(h: str) -> tuple[str, str]:
+        return tuple(h.split(os.sep)[-2:])
+
+    first = [ts for h in hours if key(h) == key(hours[0]) for ts, _ in _frames_in(h, cam)]
+    last = [ts for h in hours if key(h) == key(hours[-1]) for ts, _ in _frames_in(h, cam)]
     if not first or not last:
         return None
-    return first[0][0], last[-1][0]
+    return min(first), max(last)
 
 
 def count(cam: str | None = "current") -> int:

@@ -154,9 +154,16 @@ async def shoot(chat, camera_id: str) -> None:
     # same rotation and same clock in the corner as the archive frames — a
     # photo shouldn't arrive sideways and undated just because you asked for
     # it by hand
-    path = await timelapse.prepare(path)
+    shot_at = time.time()
+    path = await timelapse.prepare(path, shot_at)
+    # …and it also goes into the archive, so a photo taken by hand is part of
+    # the timelapse instead of vanishing once the message is sent
+    filed = await asyncio.to_thread(timelapse.archive_shot, path, camera_id, shot_at)
+    caption = "📷 задняя" if camera_id == "0" else "🤳 фронтальная"
+    if filed:
+        caption += " · в архиве"
     with open(path, "rb") as fh:
-        await chat.send_photo(fh, caption="📷 задняя" if camera_id == "0" else "🤳 фронтальная")
+        await chat.send_photo(fh, caption=caption)
     try:
         os.remove(path)
     except OSError:
@@ -430,8 +437,11 @@ def tl_setup_kb() -> InlineKeyboardMarkup:
         [(f"🖼 Качество: {quality.get(px, px)} ({px}px)", "tl:set:px")],
         [(f"🔄 Поворот кадра: {timelapse.rotate()}°", "tl:set:rot")],
         [(f"💾 Лимит архива: {timelapse.limit_mb() // 1024} ГБ", "tl:set:limit")],
+        [(f"🗂 Хранить на: {timelapse.storage_note()}", "tl:set:card")],
         [("🎯 Пишу: только движение" if timelapse.motion_only() else "🎞 Пишу: всё подряд",
           "tl:set:motion")],
+        [("📸 Ручные снимки: в архив" if timelapse.keep_manual()
+          else "📸 Ручные снимки: мимо архива", "tl:set:manual")],
     ]
     if timelapse.motion_only():
         rows.append([(f"📶 Чувствительность: {sens[timelapse.motion_level()]}",
@@ -984,9 +994,16 @@ async def timelapse_cb(q, ctx, what: str) -> None:
         elif key == "rot":
             store.put("tl_rotate", (timelapse.rotate() + 90) % 360)
         elif key == "limit":
-            steps = [1024, 2048, 5120, 7168]
+            steps = timelapse.limit_steps()
             store.put("tl_limit_mb", steps[(steps.index(timelapse.limit_mb()) + 1) % len(steps)]
                       if timelapse.limit_mb() in steps else 5120)
+        elif key == "card":
+            if not timelapse.card_root(force=True) and not timelapse.use_card():
+                await q.answer("Карты не видно — Termux её не отдаёт", show_alert=True)
+                return
+            store.set_flag("tl_use_card", not timelapse.use_card())
+        elif key == "manual":
+            store.set_flag("tl_keep_manual", not timelapse.keep_manual())
         elif key == "motion":
             store.set_flag("tl_motion_only", not timelapse.motion_only())
         elif key == "sens":
@@ -1041,13 +1058,19 @@ async def timelapse_cb(q, ctx, what: str) -> None:
                      f"по {time.strftime('%d.%m %H:%M', time.localtime(newest))}")
         else:
             depth = "пусто"
-        per_day = 86400 // max(1, timelapse.interval())
-        mb_day = (size / max(1, frames)) * per_day if frames else 0
+        # measured, not predicted: in motion mode most ticks save nothing, so
+        # "interval × 24 h" overstates the real appetite several times over
+        days = (span[1] - span[0]) / 86400 if span else 0
+        mb_day = size / days if days > 0.2 else 0
+        left = ((timelapse.limit_mb() - size) / mb_day) if mb_day else 0
+        forecast = (f"Расход: ~{mb_day:.0f} МБ в сутки — при таком темпе лимита "
+                    f"хватит ещё примерно на {left:.0f} сут\n" if mb_day else "")
         await chat.send_message(
             f"📊 <b>Архив таймлапса</b>\n"
             f"Кадров: {frames} · {size} МБ из {timelapse.limit_mb()} МБ\n"
             f"Охват: {depth}\n"
-            f"Расход: ~{mb_day:.0f} МБ в сутки при интервале {timelapse.interval()} сек\n"
+            f"Лежит на: {timelapse.storage_note()}\n"
+            f"{forecast}"
             f"<i>Когда упрёмся в лимит, самые старые кадры начнут стираться сами.</i>",
             parse_mode=ParseMode.HTML)
         return
