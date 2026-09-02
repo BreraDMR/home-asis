@@ -151,8 +151,21 @@ MAX_CLIP_FRAMES = 900
 # Compared on a 64-px greyscale thumbnail, so this is "average brightness
 # change per pixel, 0-255" — a person walking through moves it well past 6,
 # while sensor noise in a dark room sits under 2.
-MOTION_LEVELS = {"low": 3.0, "mid": 6.0, "high": 12.0}
+MOTION_LEVELS = {"max": 1.5, "low": 3.0, "mid": 6.0, "high": 12.0}
 DEFAULT_MOTION = "mid"
+
+# "max" sits below the sensor noise a dark room shows (measured median 1.96),
+# so at night it keeps nearly everything — which is the point of having it, but
+# it's not a setting to leave on by accident.
+MOTION_NAMES = {"max": "очень чуткая", "low": "чуткая",
+                "mid": "обычная", "high": "грубая"}
+
+# When the motion filter applies at all. Daylight is when you actually want
+# every frame — a filtered day plays back as a stack of jump cuts. At night
+# the room is dark and still, and filtering is the only thing keeping the
+# archive from being nine hours of identical black.
+MOTION_WHEN = ("always", "night", "off")
+NIGHT_WINDOWS = ((23, 8), (0, 8), (1, 9), (22, 7), (0, 6))
 
 # Even with nothing moving, keep one frame every so often. Otherwise a quiet
 # night leaves a hole in the archive and you can't tell "nothing happened"
@@ -226,6 +239,89 @@ def storage_note() -> str:
            f"{place}, свободно {free} МБ"
 
 
+# Walking the whole archive to weigh it is cheap at four thousand files and
+# less so at forty thousand, and the answer barely moves hour to hour.
+_PROFILE_TTL = 900.0
+_profile_at = 0.0
+_profile: tuple[float, dict[int, float], dict[int, float]] | None = None
+
+
+def profile(force: bool = False) -> tuple[float, dict[int, float], dict[int, float]]:
+    """What the archive actually costs: (average frame in KB, frames per day
+    by hour of day, average frame in KB by hour of day).
+
+    Measured rather than assumed. The per-hour frame counts already carry
+    whatever filtering was in force when they were written, which is exactly
+    what's needed to guess what a filtered hour will cost tomorrow. The
+    per-hour sizes matter too: a dark 3 a.m. frame is 29 KB and a sunlit 7 p.m.
+    one is 160 KB, so one average across the day would be wrong at both ends.
+    """
+    global _profile_at, _profile
+    if _profile is not None and not force and time.time() - _profile_at < _PROFILE_TTL:
+        return _profile
+    frames: dict[int, int] = {}
+    hour_bytes: dict[int, int] = {}
+    total_bytes = total_n = 0
+    oldest = newest = 0.0
+    for hour_dir in _hour_dirs():
+        try:
+            hour = int(hour_dir.split(os.sep)[-1])
+        except ValueError:
+            continue
+        for ts, path in _frames_in(hour_dir):
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            total_bytes += size
+            total_n += 1
+            frames[hour] = frames.get(hour, 0) + 1
+            hour_bytes[hour] = hour_bytes.get(hour, 0) + size
+            oldest = ts if not oldest else min(oldest, ts)
+            newest = max(newest, ts)
+    # real elapsed time, not the number of date folders: the first and last
+    # day are almost always partial, and counting them whole would flatter
+    # every per-day number by ten percent or more
+    span = max(0.5, (newest - oldest) / 86400)
+    avg_kb = (total_bytes / total_n / 1024) if total_n else 120.0
+    _profile = (avg_kb,
+                {h: n / span for h, n in frames.items()},
+                {h: hour_bytes[h] / frames[h] / 1024 for h in frames})
+    _profile_at = time.time()
+    return _profile
+
+
+def forecast_mb_day() -> float:
+    """Megabytes a day the current settings will cost.
+
+    Hours that get filtered are priced from what they historically cost;
+    hours that keep everything are priced from the interval, because that's
+    arithmetic, not guesswork.
+    """
+    avg_kb, per_hour, kb_at = profile()
+    iv = max(1, interval())
+    keepalive = 3600 / KEEPALIVE_SECONDS
+    mode = motion_when()
+    mb = 0.0
+    for hour in range(24):
+        filtered = mode == "always" or (mode == "night" and in_night(hour))
+        n = (max(per_hour.get(hour, keepalive), keepalive) if filtered
+             else 3600 / iv)
+        mb += n * kb_at.get(hour, avg_kb) / 1024
+    return mb
+
+
+def forecast_note() -> str:
+    """One line: how deep the archive will get before the ring starts biting."""
+    mb_day = forecast_mb_day()
+    if mb_day <= 0:
+        return "расход пока не посчитать — архив пуст"
+    days = limit_mb() / mb_day
+    depth = (f"{days:.0f} сут" if days >= 2 else f"{days * 24:.0f} ч")
+    return f"~{mb_day / 1024:.1f} ГБ в сутки, лимита хватит на {depth}" if mb_day >= 1024 \
+        else f"~{mb_day:.0f} МБ в сутки, лимита хватит на {depth}"
+
+
 def rotate() -> int:
     """Degrees to turn each frame. The phone usually lies on its side."""
     return _int("tl_rotate", 0) % 360
@@ -235,9 +331,33 @@ def enabled() -> bool:
     return store.flag("tl_on", True)
 
 
-def motion_only() -> bool:
-    """Keep every frame, or only the ones where something changed."""
-    return store.flag("tl_motion_only", False)
+def motion_when() -> str:
+    """When the motion filter is in force: always, at night only, or never."""
+    v = store.get("tl_motion_when")
+    if v in MOTION_WHEN:
+        return v
+    # the setting used to be a yes/no flag — read the old one rather than
+    # silently switching the recorder's behaviour on upgrade
+    return "always" if store.flag("tl_motion_only", False) else "off"
+
+
+def night_window() -> tuple[int, int]:
+    """Hours the night runs between, e.g. (23, 8) — 23:00 through 07:59."""
+    a, b = _int("tl_night_from", 23), _int("tl_night_to", 8)
+    return a % 24, b % 24
+
+
+def in_night(hour: int) -> bool:
+    a, b = night_window()
+    return (hour >= a or hour < b) if a > b else (a <= hour < b)
+
+
+def filtering_at(ts: float | None = None) -> bool:
+    """Is the motion filter deciding this frame's fate?"""
+    mode = motion_when()
+    if mode != "night":
+        return mode == "always"
+    return in_night(dt.datetime.fromtimestamp(ts or time.time()).hour)
 
 
 def motion_level() -> str:
@@ -646,7 +766,7 @@ async def capture_one() -> str | None:
     raw = await actions.photo(cam)
     if not raw:
         return None
-    if motion_only():
+    if filtering_at():
         keep, _ = await asyncio.to_thread(_worth_keeping, raw)
         if not keep:
             try:

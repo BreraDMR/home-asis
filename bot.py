@@ -414,10 +414,13 @@ def timelapse_text() -> str:
     else:
         depth = "архив пока пуст"
     state = "🔴 пишет" if timelapse.enabled() else "⏸ остановлен"
-    mode = ("кадр раз в {} сек, только когда что-то движется"
-            if timelapse.motion_only() else "кадр раз в {} сек").format(timelapse.interval())
+    when = timelapse.motion_when()
+    tail = {"always": ", только когда что-то движется",
+            "night": ", ночью — только когда что-то движется",
+            "off": ""}[when]
+    mode = f"Кадр раз в {timelapse.interval()} сек{tail}"
     return (f"📹 <b>Таймлапс</b> — {state}\n"
-            f"{mode.capitalize()} · {depth}\n"
+            f"{mode} · {depth}\n"
             f"<i>Старое стирается само, когда архив дорастает до "
             f"{timelapse.limit_mb() // 1024} ГБ.</i>")
 
@@ -427,25 +430,34 @@ async def section_timelapse(update: Update, ctx) -> None:
                                     reply_markup=timelapse_kb())
 
 
+def tl_setup_text() -> str:
+    return ("⚙️ <b>Настройки записи</b>\n"
+            f"<i>{timelapse.forecast_note()}.</i>")
+
+
 def tl_setup_kb() -> InlineKeyboardMarkup:
     cam = "задняя" if timelapse.camera() == "0" else "фронтальная"
     px = timelapse.width()
     quality = {640: "экономно", 960: "средне", 1280: "детально", 1600: "максимум"}
-    sens = {"low": "чуткая", "mid": "обычная", "high": "грубая"}
     rows = [
         [(f"📷 Камера: {cam}", "tl:set:cam")],
         [(f"🖼 Качество: {quality.get(px, px)} ({px}px)", "tl:set:px")],
         [(f"🔄 Поворот кадра: {timelapse.rotate()}°", "tl:set:rot")],
         [(f"💾 Лимит архива: {timelapse.limit_mb() // 1024} ГБ", "tl:set:limit")],
         [(f"🗂 Хранить на: {timelapse.storage_note()}", "tl:set:card")],
-        [("🎯 Пишу: только движение" if timelapse.motion_only() else "🎞 Пишу: всё подряд",
-          "tl:set:motion")],
         [("📸 Ручные снимки: в архив" if timelapse.keep_manual()
           else "📸 Ручные снимки: мимо архива", "tl:set:manual")],
     ]
-    if timelapse.motion_only():
-        rows.append([(f"📶 Чувствительность: {sens[timelapse.motion_level()]}",
-                      "tl:set:sens")])
+    when = timelapse.motion_when()
+    rows.append([({"always": "🎯 Отбор по движению: всегда",
+                   "night": "🌙 Отбор по движению: только ночью",
+                   "off": "🎞 Пишу всё подряд, круглые сутки"}[when], "tl:set:motion")])
+    if when != "off":
+        rows.append([(f"📶 Чувствительность: "
+                      f"{timelapse.MOTION_NAMES[timelapse.motion_level()]}", "tl:set:sens")])
+    if when == "night":
+        a, b = timelapse.night_window()
+        rows.append([(f"🌙 Ночь: с {a:02d}:00 до {b:02d}:00", "tl:set:night")])
     rows.append([("🕒 Время на кадре: показывать" if timelapse.stamped()
                   else "🕒 Время на кадре: нет", "tl:set:stamp")])
     rows.append([("🕒 Подписать кадры, снятые раньше", "tl:stampold")])
@@ -978,7 +990,8 @@ async def timelapse_cb(q, ctx, what: str) -> None:
 
     if what == "setup":
         await q.answer()
-        await q.edit_message_text("⚙️ <b>Настройки записи</b>", parse_mode=ParseMode.HTML,
+        await asyncio.to_thread(timelapse.profile)   # first call walks the archive
+        await q.edit_message_text(tl_setup_text(), parse_mode=ParseMode.HTML,
                                   reply_markup=tl_setup_kb())
         return
 
@@ -1005,11 +1018,20 @@ async def timelapse_cb(q, ctx, what: str) -> None:
         elif key == "manual":
             store.set_flag("tl_keep_manual", not timelapse.keep_manual())
         elif key == "motion":
-            store.set_flag("tl_motion_only", not timelapse.motion_only())
+            steps = timelapse.MOTION_WHEN
+            store.put("tl_motion_when",
+                      steps[(steps.index(timelapse.motion_when()) + 1) % len(steps)])
+        elif key == "night":
+            steps = timelapse.NIGHT_WINDOWS
+            cur = timelapse.night_window()
+            nxt = steps[(steps.index(cur) + 1) % len(steps)] if cur in steps else steps[0]
+            store.put("tl_night_from", nxt[0])
+            store.put("tl_night_to", nxt[1])
         elif key == "sens":
-            steps = ["low", "mid", "high"]
+            steps = ["max", "low", "mid", "high"]
             store.put("tl_motion_level",
-                      steps[(steps.index(timelapse.motion_level()) + 1) % len(steps)])
+                      steps[(steps.index(timelapse.motion_level()) + 1) % len(steps)]
+                      if timelapse.motion_level() in steps else "mid")
         elif key == "stamp":
             store.set_flag("tl_stamp", not timelapse.stamped())
         elif key == "backbtn":
@@ -1019,7 +1041,10 @@ async def timelapse_cb(q, ctx, what: str) -> None:
             await q.edit_message_reply_markup(reply_markup=tl_setup_kb())
             return
         await q.answer("Поменял")
-        await q.edit_message_reply_markup(reply_markup=tl_setup_kb())
+        # the forecast is part of the text, so redraw it too — the whole point
+        # of these buttons is seeing what they cost before walking away
+        await q.edit_message_text(tl_setup_text(), parse_mode=ParseMode.HTML,
+                                  reply_markup=tl_setup_kb())
         return
 
     if what == "stampold":
