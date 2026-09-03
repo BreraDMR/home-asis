@@ -38,13 +38,19 @@ size cap. Nothing to start, nothing to stop — you only ever look backwards.
 - long windows are thinned before encoding, so a day is a minute of playback
   in a few megabytes rather than four thousand frames nobody will watch
 - "what did it look like at 15:10" returns the three nearest frames
-- **motion mode**: keep a frame only when the picture actually changed
+- **motion filtering**, and you pick *when* it applies: always, at night only,
+  or never
+- photos taken by hand from the camera button land in the archive too, under
+  whichever camera took them
 - the date and time are burnt into the corner of every frame — not added as a
   caption, because a caption is gone the moment the frames become a video.
   Frames saved before this existed can be back-filled from the settings
+- the settings screen carries a forecast — megabytes a day, and how long the
+  cap will last — recalculated on every press, so you see what a setting costs
+  before you walk away
 
-Frames live in `frames/<date>/<hour>/<mmss>.jpg` — the filesystem is the
-index, so a window of time is one or two directory reads and nothing goes
+Frames live in `frames/<date>/<hour>/<mmss>_<camera>.jpg` — the filesystem is
+the index, so a window of time is one or two directory reads and nothing goes
 stale if the process is killed mid-write.
 
 Motion detection is a 64-px greyscale thumbnail compared against the previous
@@ -54,6 +60,25 @@ pushes it past 30. The camera still fires on every tick, because there is no
 other way to notice movement without a hardware PIR sensor, so this saves
 archive rather than battery. One frame every ten minutes is kept whatever
 happens, so a quiet night still proves the camera was alive.
+
+Filtering the daylight hours is usually the wrong trade: it throws away most
+of the day and plays back as a stack of jump cuts. Night is the opposite —
+the room is dark and still, and unfiltered it is nine hours of identical
+black that costs real space. Hence "night only", with a pickable window.
+
+**Where the frames go**
+
+Internal storage by default. If a memory card is in the phone and Termux has
+been given storage permission, the archive moves to the card instead — Android
+only lets an app write to its own corner of a removable card, so the target is
+`/storage/<UUID>/Android/data/com.termux/files/frames`, which is what
+`termux-setup-storage` links to as `~/storage/external-1`.
+
+Nothing depends on the card being there. Both locations are read together and
+sorted by hour, so swapping a card does not cut the timeline in two, and the
+ring still deletes the genuinely oldest frames first wherever they live. If
+the card disappears mid-recording the archive falls back to internal storage
+and the bot says so.
 
 **Watchers (the phone messages you on its own)**
 
@@ -206,12 +231,17 @@ The first camera, microphone or location call raises an Android permission
 dialog that has to be accepted on the phone itself — it cannot be granted
 remotely. Do it once, up front, or the first remote photo will silently fail.
 
+Storing frames on a memory card needs one more: run `termux-setup-storage` and
+accept the dialog. Until that happens the card is invisible to the app —
+writing anywhere on it, including `Android/data/`, comes back as permission
+denied — and the recorder quietly stays on internal storage.
+
 ## Layout
 
 ```
 bot.py       menus, handlers, the button UI
 actions.py   thin wrappers over the termux-* binaries
-timelapse.py the rolling recorder, the frame archive, and GIF clips
+timelapse.py the rolling recorder, the frame archive, and h264 clips
 watchers.py  background loops that message you on events
 netscan.py   ping sweep + ARP + access point scan
 ir.py        NEC encoder and the LG code table (infrared remote)
