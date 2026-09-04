@@ -12,6 +12,9 @@ joined or left the network.
 No root, no custom ROM. Everything here works on stock Android 7 with Termux
 installed from the F-Droid/GitHub builds.
 
+The bot's own interface is in Russian — that is the language of the people who
+use it. Code, comments and this file are in English.
+
 ## What it does
 
 **Remote (you press a button, the phone acts)**
@@ -201,7 +204,14 @@ Copy `.env.example` to `.env` and fill it in:
 HOMEBOT_TOKEN=<token from @BotFather>
 HOMEBOT_OWNERS=<your telegram id>[,<second id>]
 HOMEBOT_GUESTS=<telegram id>[,<second id>]
+
+HOMEBOT_TV_IP=<the TV's address on your LAN>
+HOMEBOT_TV_MAC=<its MAC, for Wake-on-LAN over cable>
+HOMEBOT_TV_NAME=<whatever you want it called in the messages>
 ```
+
+The three TV lines are optional — leave them empty and the network remote is
+simply unavailable; everything else works.
 
 `HOMEBOT_OWNERS` is a hard allowlist: anyone else gets "this bot is private"
 and nothing else. The file is git-ignored and never leaves the phone.
@@ -216,7 +226,11 @@ to the owner.
 
 ## Running it
 
+The bot reads its settings from the environment, so export `.env` before
+starting it:
+
 ```sh
+set -a; . ./.env; set +a
 python bot.py
 ```
 
