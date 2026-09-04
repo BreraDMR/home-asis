@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import uuid
 
 import websockets
 
-TV_IP = "192.168.1.100"
-TV_MAC = "00:00:00:00:00:00"
+# Set these in .env — they're specific to your house, not to the model.
+TV_IP = os.environ.get("HOMEBOT_TV_IP", "")
+TV_MAC = os.environ.get("HOMEBOT_TV_MAC", "")
+TV_NAME = os.environ.get("HOMEBOT_TV_NAME", "TV")
 PORT = 3000
 
 # Everything we might ever want to do, asked for once at pairing time.
@@ -255,10 +258,15 @@ def wake(mac: str = TV_MAC, repeat: int = 3) -> None:
     so we send to both, on both of the usual ports, a few times over. The TV
     still has to have "Mobile TV On" enabled or none of this reaches anything.
     """
+    if not mac:
+        raise RuntimeError("HOMEBOT_TV_MAC is not set — nothing to wake")
     raw = bytes.fromhex(mac.replace(":", "").replace("-", ""))
     packet = b"\xff" * 6 + raw * 16
-    targets = [("255.255.255.255", 9), ("255.255.255.255", 7),
-               ("192.168.1.255", 9), ("192.168.1.255", 7)]
+    targets = [("255.255.255.255", 9), ("255.255.255.255", 7)]
+    if TV_IP.count(".") == 3:
+        # subnet broadcast for whatever /24 the TV sits on
+        subnet = TV_IP.rsplit(".", 1)[0] + ".255"
+        targets += [(subnet, 9), (subnet, 7)]
     for _ in range(repeat):
         for host, port in targets:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -284,7 +292,7 @@ async def reachable(ip: str = TV_IP, timeout: float = 1.5) -> bool:
 
 # DIAL sits on its own port and needs no pairing, so it can report app state
 # even before we're registered.
-DIAL_APPS = f"http://{TV_IP}:36866/apps"
+DIAL_APPS = f"http://{TV_IP}:36866/apps" if TV_IP else ""
 
 YOUTUBE_ID = "youtube.leanback.v4"
 
