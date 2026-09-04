@@ -243,12 +243,12 @@ def tv_net_kb() -> InlineKeyboardMarkup:
 async def tv_net_message(chat) -> None:
     if tv_net() is None:
         await chat.send_message(
-            "Телевизор ещё не спарен по сети. На телефоне: "
-            "<code>cd ~/lab/homebot && python pair_tv.py left ok</code>",
+            "Телевизор ещё не спарен по сети. На телефоне, в папке бота: "
+            "<code>python pair_tv.py left ok</code>",
             parse_mode=ParseMode.HTML)
         return
     await chat.send_message(
-        "🌐 <b>Телевизор по сети</b>\nLG 50LF652V · 192.168.1.100\n"
+        f"🌐 <b>Телевизор по сети</b>\n{html.escape(tv.TV_NAME)}\n"
         "<i>Ссылку на YouTube можно просто прислать сюда — включится на телевизоре.\n"
         "Включение идёт по ИК: спящий телевизор глушит сетевой порт и разбудить "
         "его по кабелю невозможно.</i>",
@@ -279,7 +279,7 @@ def tv_kb(recording: bool = False) -> InlineKeyboardMarkup:
 
 async def section_tv(update: Update, ctx) -> None:
     await update.message.reply_text(
-        "📺 <b>LG 50LF652V</b>\nЧем управлять?",
+        f"📺 <b>{html.escape(tv.TV_NAME)}</b>\nЧем управлять?",
         parse_mode=ParseMode.HTML,
         reply_markup=ikb([
             [("🎛 Обычный (ИК питание + сеть)", "tvpick:mix")],
@@ -289,10 +289,10 @@ async def section_tv(update: Update, ctx) -> None:
     )
 
 
-# The third remote: питание уходит по ИК (сеть его разбудить не может — в
-# дежурном режиме телевизор глушит порт), всё остальное — по сети. Каналов
-# и настроек ТВ здесь нет: с них Дамир всё равно не пользуется, а лишние
-# кнопки только мешают попасть в нужную.
+# The third remote: power goes over IR (the network cannot wake the set — it
+# kills its port in standby), everything else over the network. No channel or
+# picture settings here: nobody uses them from a phone and the extra buttons
+# only make the useful ones harder to hit.
 def tv_mix_kb() -> InlineKeyboardMarkup:
     return ikb([
         [("⏻ Включить (ИК)", "tvc:on"), ("⏻ Выключить (ИК)", "tvc:off")],
@@ -718,7 +718,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer()
         if data.endswith(":mix"):
             await chat.send_message(
-                "🎛 <b>Телевизор</b>\nLG 50LF652V · 192.168.1.100\n"
+                f"🎛 <b>Телевизор</b>\n{html.escape(tv.TV_NAME)}\n"
                 "<i>Питание идёт по ИК, всё остальное — по сети. Ссылку на YouTube "
                 "можно просто прислать в чат, включится сразу на видео.</i>",
                 parse_mode=ParseMode.HTML, reply_markup=tv_mix_kb())
@@ -782,7 +782,8 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if what == "cancel":
             ctx.user_data.pop("macro_rec", None)
             await q.answer("Отменил")
-            await q.edit_message_text("📺 <b>LG 50LF652V</b>", parse_mode=ParseMode.HTML,
+            await q.edit_message_text(f"📺 <b>{html.escape(tv.TV_NAME)}</b>",
+                                      parse_mode=ParseMode.HTML,
                                       reply_markup=tv_kb())
             return
         if what == "save":
@@ -877,7 +878,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if data.startswith("pickdev:"):
         ctx.user_data["await"] = ("label_dev", data.split(":", 1)[1])
         await q.answer()
-        await chat.send_message("Напиши название для этого устройства (например «мак Дамира»).")
+        await chat.send_message("Напиши название для этого устройства (например «мой ноут»).")
         return
 
     if data.startswith("picknet:"):

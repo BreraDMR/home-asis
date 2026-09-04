@@ -12,7 +12,7 @@ import actions
 import netscan
 import store
 
-# Damir wants to see every network, however faint — so nothing is filtered out.
+# Nothing is filtered out — even a faint network is worth seeing.
 # The anti-spam trick is batching: one message per scan, not one per network.
 BATCH_LIMIT = 12  # if more than this appear at once, summarise instead
 
@@ -121,9 +121,9 @@ async def networks_watcher(send, period: int = 300) -> None:
             found = await netscan.scan_networks()
             if found:
                 appeared, gone = store.seen_networks(found)
-                # Off by default now: Damir found the neighbours' routers coming
-                # and going all day genuinely annoying. The log keeps everything,
-                # the button shows it on demand.
+                # Off by default: in a block of flats the neighbouring routers
+                # come and go all day and the notifications get tiring. The log
+                # keeps everything, the button shows it on demand.
                 if store.flag("notify_networks", False):
                     fresh = [n for n in appeared if n.get("is_new")]
                     back = [n for n in appeared if not n.get("is_new")]
