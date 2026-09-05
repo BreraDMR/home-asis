@@ -1,4 +1,17 @@
-# Home Asis
+<div align="center">
+
+# 🏠 Home Asis
+
+**An old Android phone becomes a home hub: cameras, a rolling timelapse, a room mic, two TV remotes and watchers that message you when the power, the internet or a device changes.**
+
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white&style=for-the-badge)](requirements.txt)
+[![python-telegram-bot](https://img.shields.io/badge/python--telegram--bot-22.x%20async-2CA5E0?logo=telegram&logoColor=white&style=for-the-badge)](requirements.txt)
+[![Termux](https://img.shields.io/badge/Termux-termux--api-000000?logo=termux&logoColor=white&style=for-the-badge)](https://termux.dev)
+[![Android](https://img.shields.io/badge/Android%207-no%20root-3DDC84?logo=android&logoColor=white&style=for-the-badge)](#requirements)
+[![SQLite](https://img.shields.io/badge/SQLite-storage-003B57?logo=sqlite&logoColor=white&style=for-the-badge)](store.py)
+[![webOS](https://img.shields.io/badge/webOS-SSAP%20remote-A50034?logo=lg&logoColor=white&style=for-the-badge)](tv.py)
+
+</div>
 
 A Telegram bot that turns an old Android phone into a small home hub.
 
